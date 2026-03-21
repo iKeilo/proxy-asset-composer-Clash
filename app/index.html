@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Proxy Asset Composer Demo</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <p class="eyebrow">HTML DEMO</p>
+        <h1>Proxy Asset Composer</h1>
+        <p class="lead">把订阅转换升级成“配置、资产库、规则、可复用分流策略”的统一工作台。</p>
+      </div>
+
+      <section class="panel stats-panel">
+        <div class="stat">
+          <span class="stat-label">资产库</span>
+          <strong id="assetCount">0</strong>
+        </div>
+        <div class="stat">
+          <span class="stat-label">节点数</span>
+          <strong id="nodeCount">0</strong>
+        </div>
+        <div class="stat">
+          <span class="stat-label">策略层</span>
+          <strong id="strategyCount">0</strong>
+        </div>
+        <div class="stat">
+          <span class="stat-label">规则数</span>
+          <strong id="ruleCount">0</strong>
+        </div>
+      </section>
+
+      <section class="panel file-panel">
+        <div class="panel-head">
+          <h2>配置文件</h2>
+          <span class="tag">Import / Export</span>
+        </div>
+        <input id="configExportName" placeholder="导出文件名，可留空">
+        <div class="action-row">
+          <input id="configFileInput" type="file" accept=".yaml,.yml,.txt" hidden>
+          <button id="importConfigBtn" class="ghost">导入配置文件</button>
+          <button id="exportConfigBtn" class="primary">导出配置文件</button>
+        </div>
+        <p class="hint">留空时按 `ver0.0.0`、`ver0.0.1` 递增命名。</p>
+      </section>
+    </aside>
+
+    <main class="workspace">
+      <section class="canvas topbar">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">WORKSPACE</p>
+            <h2>工作台</h2>
+          </div>
+          <div class="action-row">
+            <button id="openConfigBtn" class="ghost gear-btn">⚙ 配置</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="canvas">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">COMPOSER</p>
+            <h2>1. 分流策略编排</h2>
+          </div>
+          <div class="action-row">
+            <button id="loadTemplateBtn" class="ghost">载入模板</button>
+            <button id="addStrategyBtn" class="primary">新增策略层</button>
+          </div>
+        </div>
+        <div id="strategyEditor" class="strategy-editor"></div>
+      </section>
+
+      <section class="canvas preview-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">OUTPUT</p>
+            <h2>2. Clash 配置预览</h2>
+          </div>
+          <div class="action-row">
+            <label class="inline-select">
+              目标格式
+              <select id="targetFormat">
+                <option value="clash">Clash</option>
+                <option value="mihomo">Mihomo</option>
+                <option value="surge">Surge</option>
+              </select>
+            </label>
+            <button id="exportBtn" class="ghost">刷新预览</button>
+          </div>
+        </div>
+        <div class="preview-meta">
+          <span>策略引用在导出时保留策略名，资产库引用展开为节点。</span>
+          <span id="resolveInfo"></span>
+        </div>
+        <div id="validationPanel" class="validation-panel"></div>
+        <pre id="outputPreview"></pre>
+      </section>
+    </main>
+  </div>
+
+  <div id="configPage" class="config-page hidden">
+    <div class="config-overlay"></div>
+    <section class="config-drawer">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">CONFIG PAGE</p>
+          <h2>配置</h2>
+        </div>
+        <div class="action-row">
+          <button id="closeConfigBtn" class="ghost">关闭</button>
+        </div>
+      </div>
+
+      <div class="section-head">
+        <div>
+          <h3>导入与资产库</h3>
+        </div>
+        <div class="action-row">
+          <input id="templateFileInput" type="file" accept=".db,.json,.txt" hidden>
+          <button id="importTemplateBtn" class="ghost">导入模板</button>
+          <button id="exportTemplateBtn" class="ghost">导出模板 DB</button>
+        </div>
+      </div>
+
+      <div class="config-grid">
+        <section class="config-panel">
+          <div class="panel-head">
+            <h3>节点导入</h3>
+            <span class="tag">SS / VMess / VLESS / Trojan</span>
+          </div>
+          <textarea id="rawInput" spellcheck="false"></textarea>
+          <div class="action-row">
+            <button id="normalizeBtn" class="primary">导入节点</button>
+            <button id="loadSampleBtn" class="ghost">载入节点</button>
+          </div>
+        </section>
+
+        <section class="config-panel">
+          <div class="panel-head">
+            <h3>Clash 配置导入</h3>
+            <span class="tag">base / dns / sniffer / rule-providers / rules</span>
+          </div>
+          <textarea id="clashConfigInput" spellcheck="false"></textarea>
+          <div class="action-row">
+            <input id="clashConfigFileInput" type="file" accept=".yaml,.yml,.txt" hidden>
+            <button id="chooseClashConfigBtn" class="ghost">选择配置文件</button>
+            <button id="importClashConfigBtn" class="ghost">导入 Clash 配置</button>
+          </div>
+        </section>
+      </div>
+
+      <section class="config-panel">
+        <div class="panel-head">
+          <h3>资产库</h3>
+          <div class="action-row">
+            <button id="seedAssetsBtn" class="ghost">按地区预分组</button>
+            <button id="openKeywordGroupBtn" class="ghost">关键词分组</button>
+            <button id="addAssetBtn" class="ghost">新建资产库</button>
+          </div>
+        </div>
+        <div id="assetGrid" class="asset-list"></div>
+      </section>
+
+      <section class="config-panel">
+        <div class="section-head">
+          <div>
+            <h3>规则管理</h3>
+          </div>
+        </div>
+        <div class="rules-layout">
+          <section class="rules-panel">
+            <div class="panel-head">
+              <h3>Sniffer</h3>
+              <button id="openSnifferEditorBtn" class="ghost">编辑页面</button>
+            </div>
+            <div id="snifferSummary" class="stack-list"></div>
+          </section>
+          <section class="rules-panel">
+            <div class="panel-head">
+              <h3>Rule Providers</h3>
+              <div class="action-row">
+                <button id="openProvidersEditorBtn" class="ghost">编辑页面</button>
+                <button id="addProviderBtn" class="ghost">新增 Provider</button>
+              </div>
+            </div>
+            <div id="providersSummary" class="stack-list"></div>
+          </section>
+          <section class="rules-panel">
+            <div class="panel-head">
+              <h3>Rules</h3>
+              <button id="addRuleBtn" class="ghost">新增规则</button>
+            </div>
+            <div id="rulesEditor" class="stack-list"></div>
+          </section>
+        </div>
+      </section>
+    </section>
+  </div>
+
+  <div id="snifferPage" class="config-page hidden">
+    <div class="config-overlay"></div>
+    <section class="config-drawer sub-editor">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">EDITOR</p>
+          <h2>Sniffer 编辑页</h2>
+        </div>
+        <div class="action-row">
+          <button id="closeSnifferEditorBtn" class="ghost">关闭</button>
+        </div>
+      </div>
+      <div id="snifferEditor" class="stack-list"></div>
+    </section>
+  </div>
+
+  <div id="providersPage" class="config-page hidden">
+    <div class="config-overlay"></div>
+    <section class="config-drawer sub-editor">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">EDITOR</p>
+          <h2>Rule Providers 编辑页</h2>
+        </div>
+        <div class="action-row">
+          <button id="closeProvidersEditorBtn" class="ghost">关闭</button>
+        </div>
+      </div>
+      <div id="providersEditor" class="stack-list"></div>
+    </section>
+  </div>
+
+  <div id="nodeModal" class="config-page hidden">
+    <div class="config-overlay"></div>
+    <section class="config-drawer sub-editor node-modal">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">ADD NODE</p>
+          <h2>新增节点</h2>
+        </div>
+        <div class="action-row">
+          <button id="closeNodeModalBtn" class="ghost">关闭</button>
+        </div>
+      </div>
+      <div class="config-panel">
+        <label class="field-label" for="nodeImportTextarea">粘贴节点分享链接</label>
+        <textarea id="nodeImportTextarea" spellcheck="false" placeholder="支持 SS / VMess / VLESS / Trojan / Hysteria2"></textarea>
+        <div class="action-row">
+          <button id="submitNodeImportBtn" class="primary">解析并加入资产库</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div id="keywordGroupModal" class="config-page hidden">
+    <div class="config-overlay"></div>
+    <section class="config-drawer sub-editor node-modal">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">GROUP NODES</p>
+          <h2>关键词分组</h2>
+        </div>
+        <div class="action-row">
+          <button id="closeKeywordGroupBtn" class="ghost">关闭</button>
+        </div>
+      </div>
+      <div class="config-panel">
+        <input id="keywordGroupName" placeholder="目标资产库名称">
+        <input id="keywordGroupPattern" placeholder="关键词或正则表达式">
+        <label class="field-label"><input id="keywordRegexToggle" type="checkbox"> 启用正则表达式匹配</label>
+        <div class="action-row">
+          <button id="submitKeywordGroupBtn" class="primary">归类匹配节点</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <template id="assetTemplate">
+    <article class="asset-card">
+      <div class="asset-head">
+        <input class="asset-name" />
+        <select class="asset-kind">
+          <option value="region">地区</option>
+          <option value="provider">供应商</option>
+          <option value="scene">场景</option>
+          <option value="custom">自定义</option>
+        </select>
+      </div>
+      <div class="asset-node-list"></div>
+      <div class="asset-node-actions">
+        <button class="ghost asset-add-node">新增节点</button>
+      </div>
+      <div class="asset-foot">
+        <span class="asset-summary"></span>
+        <button class="danger asset-delete">删除</button>
+      </div>
+    </article>
+  </template>
+
+  <template id="assetNodeTemplate">
+    <div class="asset-node-row">
+      <input class="node-name" placeholder="节点名称">
+      <input class="node-host" placeholder="地址/IP">
+      <input class="node-port" placeholder="端口">
+      <input class="node-protocol" placeholder="协议" readonly>
+      <input class="node-note" placeholder="备注/标签">
+      <button class="danger node-delete">删除</button>
+    </div>
+  </template>
+
+  <template id="strategyTemplate">
+    <article class="strategy-card">
+      <div class="strategy-top">
+        <input class="strategy-name" />
+        <select class="strategy-type">
+          <option value="select">手动选择</option>
+          <option value="url-test">自动测速</option>
+          <option value="fallback">故障转移</option>
+          <option value="load-balance">负载均衡</option>
+        </select>
+      </div>
+      <div class="strategy-help"></div>
+      <div class="strategy-member-list"></div>
+      <div class="strategy-member-actions">
+        <button class="ghost strategy-add-member">新增选项卡</button>
+      </div>
+      <div class="strategy-foot">
+        <span class="strategy-summary"></span>
+        <button class="danger strategy-delete">删除</button>
+      </div>
+    </article>
+  </template>
+
+  <template id="strategyMemberTemplate">
+    <div class="strategy-member-row">
+      <div class="member-tab-head">
+        <span class="member-badge">选项卡</span>
+        <button class="danger member-delete">删除</button>
+      </div>
+      <div class="member-grid">
+        <select class="member-kind">
+          <option value="constant">系统项</option>
+          <option value="node">资产库节点</option>
+          <option value="asset">资产库</option>
+          <option value="strategy">分流策略</option>
+        </select>
+        <select class="member-value"></select>
+      </div>
+    </div>
+  </template>
+
+  <template id="providerTemplate">
+    <div class="provider-card">
+      <input class="provider-name" placeholder="provider 名称">
+      <input class="provider-type" placeholder="type">
+      <input class="provider-behavior" placeholder="behavior">
+      <input class="provider-path" placeholder="path">
+      <input class="provider-url" placeholder="url">
+      <input class="provider-interval" placeholder="interval">
+      <button class="danger provider-delete">删除</button>
+    </div>
+  </template>
+
+  <template id="ruleTemplate">
+    <div class="rule-row">
+      <select class="rule-type">
+        <option value="DOMAIN-SUFFIX">域名后缀</option>
+        <option value="DOMAIN-KEYWORD">域名关键词</option>
+        <option value="DOMAIN">完整域名</option>
+        <option value="RULE-SET">规则集</option>
+        <option value="GEOSITE">地理站点</option>
+        <option value="GEOIP">地理 IP</option>
+        <option value="IP-CIDR">IP 段</option>
+        <option value="IP-CIDR6">IPv6 段</option>
+        <option value="PROCESS-NAME">进程名</option>
+        <option value="DST-PORT">目标端口</option>
+        <option value="AND">条件与</option>
+        <option value="MATCH">兜底匹配</option>
+      </select>
+      <input class="rule-value" placeholder="匹配值">
+      <input class="rule-target" placeholder="目标分流策略">
+      <button class="danger rule-delete">删除</button>
+    </div>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>

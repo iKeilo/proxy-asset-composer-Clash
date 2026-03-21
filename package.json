@@ -1,0 +1,43 @@
+{
+  "name": "proxy-asset-composer",
+  "version": "0.0.1",
+  "description": "Desktop prototype for proxy asset composition and Clash config editing.",
+  "main": "electron/main.js",
+  "author": "Codex",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist:x64": "electron-builder --win portable --x64",
+    "dist:ia32": "electron-builder --win portable --ia32",
+    "dist:all": "electron-builder --win portable --x64 --ia32"
+  },
+  "devDependencies": {
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.codex.proxyassetcomposer",
+    "productName": "ProxyAssetComposer",
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "app/**/*",
+      "package.json"
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64",
+            "ia32"
+          ]
+        }
+      ]
+    }
+  }
+}
