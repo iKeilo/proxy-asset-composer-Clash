@@ -38,6 +38,41 @@ const templates = {
 };
 
 const allowedConstants = ["DIRECT", "REJECT"];
+const defaultClashBaseRaw = [
+  "port: 7890",
+  "socks-port: 7891",
+  "allow-lan: true",
+  "unified-delay: true",
+  "mode: Rule",
+  "log-level: info",
+  "external-controller: :9090",
+  "dns:",
+  "  enable: true",
+  "  nameserver:",
+  "    - 119.29.29.29",
+  "    - 223.5.5.5",
+  "  fallback:",
+  "    - 8.8.8.8",
+  "    - 8.8.4.4",
+  "    - tls://1.0.0.1:853",
+  "    - tls://dns.google:853"
+].join("\n");
+const defaultSnifferRaw = [
+  "enable: true",
+  "sniffing: [tls, http, quic]",
+  "force-dns-mapping: true",
+  "parse-pure-ip: true",
+  "override-destination: true"
+].join("\n");
+const defaultProvidersRaw = [
+  "TikTok:",
+  "  type: http",
+  "  behavior: classical",
+  "  path: ./ruleset/TikTok.yaml",
+  "  url: \"https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/TikTok/TikTok.yaml\"",
+  "  interval: 86400"
+].join("\n");
+let persistTimer = null;
 const flagRegionMap = [
   ["🇺🇲", "美国资产库"],
   ["🇺🇸", "美国资产库"],
@@ -56,41 +91,12 @@ const state = {
   assets: [],
   strategies: [],
   exportVersion: 0,
-  clashBaseRaw: [
-    "port: 7890",
-    "socks-port: 7891",
-    "allow-lan: true",
-    "unified-delay: true",
-    "mode: Rule",
-    "log-level: info",
-    "external-controller: :9090",
-    "dns:",
-    "  enable: true",
-    "  nameserver:",
-    "    - 119.29.29.29",
-    "    - 223.5.5.5",
-    "  fallback:",
-    "    - 8.8.8.8",
-    "    - 8.8.4.4",
-    "    - tls://1.0.0.1:853",
-    "    - tls://dns.google:853"
-  ].join("\n"),
+  importedConfigPath: "",
+  lastSavedConfigPath: "",
+  clashBaseRaw: defaultClashBaseRaw,
   rulesConfig: {
-    snifferRaw: [
-      "enable: true",
-      "sniffing: [tls, http, quic]",
-      "force-dns-mapping: true",
-      "parse-pure-ip: true",
-      "override-destination: true"
-    ].join("\n"),
-    providersRaw: [
-      "TikTok:",
-      "  type: http",
-      "  behavior: classical",
-      "  path: ./ruleset/TikTok.yaml",
-      "  url: \"https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/TikTok/TikTok.yaml\"",
-      "  interval: 86400"
-    ].join("\n"),
+    snifferRaw: defaultSnifferRaw,
+    providersRaw: defaultProvidersRaw,
     rules: []
   },
   nodeModalAssetId: null
@@ -576,6 +582,81 @@ function seedDemoData() {
   applyTemplate(templates.basic);
 }
 
+function getDefaultConfigText() {
+  return [
+    defaultClashBaseRaw,
+    "",
+    "sniffer:",
+    ...indentBlock(state.rulesConfig.snifferRaw),
+    "",
+    "rule-providers:",
+    ...indentBlock(state.rulesConfig.providersRaw),
+    "",
+    "proxy-groups:",
+    "  - name: 鑺傜偣閫夋嫨",
+    "    type: select",
+    "    proxies:",
+    "      - DIRECT",
+    "",
+    "rules:",
+    "  - MATCH,鑺傜偣閫夋嫨"
+  ].join("\n");
+}
+
+function snapshotState() {
+  return {
+    importedConfigPath: state.importedConfigPath,
+    lastSavedConfigPath: state.lastSavedConfigPath,
+    exportVersion: state.exportVersion,
+    rawInput: els.rawInput.value,
+    clashConfigInput: els.clashConfigInput.value,
+    targetFormat: els.targetFormat.value,
+    configExportName: els.configExportName.value,
+    state: {
+      assets: state.assets,
+      strategies: state.strategies,
+      clashBaseRaw: state.clashBaseRaw,
+      rulesConfig: state.rulesConfig
+    }
+  };
+}
+
+function schedulePersist() {
+  if (!window.desktopAPI?.saveSession) return;
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    window.desktopAPI.saveSession(snapshotState()).catch(() => {});
+  }, 250);
+}
+
+function hydrateFromSnapshot(snapshot) {
+  if (!snapshot || !snapshot.state) return false;
+  state.importedConfigPath = snapshot.importedConfigPath || "";
+  state.lastSavedConfigPath = snapshot.lastSavedConfigPath || "";
+  state.exportVersion = Number.isInteger(snapshot.exportVersion) ? snapshot.exportVersion : 0;
+  state.assets = Array.isArray(snapshot.state.assets) ? snapshot.state.assets : [];
+  state.strategies = Array.isArray(snapshot.state.strategies) ? snapshot.state.strategies : [];
+  state.clashBaseRaw = snapshot.state.clashBaseRaw || defaultClashBaseRaw;
+  state.rulesConfig = {
+    snifferRaw: snapshot.state.rulesConfig?.snifferRaw || defaultSnifferRaw,
+    providersRaw: snapshot.state.rulesConfig?.providersRaw || defaultProvidersRaw,
+    rules: Array.isArray(snapshot.state.rulesConfig?.rules) ? snapshot.state.rulesConfig.rules : []
+  };
+  state.nodes = state.assets.flatMap((asset) => Array.isArray(asset.nodes) ? asset.nodes : []);
+  els.rawInput.value = snapshot.rawInput || "";
+  els.clashConfigInput.value = snapshot.clashConfigInput || getDefaultConfigText();
+  els.targetFormat.value = snapshot.targetFormat || "clash";
+  els.configExportName.value = snapshot.configExportName || "";
+  return true;
+}
+
+function getPreferredSavePath(fileName) {
+  const sourcePath = state.importedConfigPath || state.lastSavedConfigPath;
+  if (!sourcePath) return fileName;
+  const normalizedName = fileName || sourcePath.split(/[\\/]/).pop() || "config.yaml";
+  return sourcePath.replace(/[^\\/]+$/, normalizedName);
+}
+
 function submitNodeImport() {
   const raw = els.nodeImportTextarea.value.trim();
   const asset = state.assets.find((item) => item.id === state.nodeModalAssetId);
@@ -642,12 +723,20 @@ function nextVersionName() {
   return name;
 }
 
-function exportCurrentConfig() {
+async function exportCurrentConfig() {
   const result = buildOutputModel();
   const content = formatClash(result);
   const rawName = els.configExportName.value.trim();
   const baseName = rawName || nextVersionName();
   const finalName = /\.(yaml|yml|txt)$/i.test(baseName) ? baseName : `${baseName}.yaml`;
+  if (window.desktopAPI?.saveConfigFile) {
+    const targetPath = getPreferredSavePath(finalName);
+    const saved = await window.desktopAPI.saveConfigFile({ filePath: targetPath, content });
+    state.lastSavedConfigPath = saved.filePath;
+    if (!state.importedConfigPath) state.importedConfigPath = saved.filePath;
+    schedulePersist();
+    return;
+  }
   const blob = new Blob([content], { type: "text/yaml;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -682,7 +771,18 @@ function bindEvents() {
   els.openConfigBtn.addEventListener("click", () => toggleOverlay(els.configPage, true));
   els.closeConfigBtn.addEventListener("click", () => toggleOverlay(els.configPage, false));
   els.configPage.querySelector(".config-overlay").addEventListener("click", () => toggleOverlay(els.configPage, false));
-  els.importConfigBtn.addEventListener("click", () => els.configFileInput.click());
+  els.importConfigBtn.addEventListener("click", async () => {
+    if (window.desktopAPI?.openConfigFile) {
+      const picked = await window.desktopAPI.openConfigFile();
+      if (!picked) return;
+      state.importedConfigPath = picked.filePath;
+      els.clashConfigInput.value = picked.text;
+      importClashConfig(picked.text);
+      render();
+      return;
+    }
+    els.configFileInput.click();
+  });
   els.configFileInput.addEventListener("change", async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -712,7 +812,18 @@ function bindEvents() {
     importTemplateDb(text);
     render();
   });
-  els.chooseClashConfigBtn.addEventListener("click", () => els.clashConfigFileInput.click());
+  els.chooseClashConfigBtn.addEventListener("click", async () => {
+    if (window.desktopAPI?.openConfigFile) {
+      const picked = await window.desktopAPI.openConfigFile();
+      if (!picked) return;
+      state.importedConfigPath = picked.filePath;
+      els.clashConfigInput.value = picked.text;
+      importClashConfig(picked.text);
+      render();
+      return;
+    }
+    els.clashConfigFileInput.click();
+  });
   els.clashConfigFileInput.addEventListener("change", async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -738,6 +849,9 @@ function bindEvents() {
   els.submitKeywordGroupBtn.addEventListener("click", applyKeywordGrouping);
   els.exportBtn.addEventListener("click", renderOutput);
   els.targetFormat.addEventListener("change", renderOutput);
+  els.rawInput.addEventListener("input", schedulePersist);
+  els.clashConfigInput.addEventListener("input", schedulePersist);
+  els.configExportName.addEventListener("input", schedulePersist);
 }
 
 function renderAssets() {
@@ -1031,6 +1145,7 @@ function renderOutput() {
   els.resolveInfo.textContent = `已解析 ${result.totalResolvedNodes} 个叶子节点，${result.reusedStrategies} 个策略引用，${state.rulesConfig.rules.length} 条规则`;
   renderValidation(result.errors);
   els.outputPreview.textContent = formatOutput(result);
+  schedulePersist();
 }
 
 function render() {
@@ -1056,8 +1171,23 @@ function escapeHtml(text) {
     .replace(/>/g, "&gt;");
 }
 
-function boot() {
+async function boot() {
+  bindEvents();
+
+  const restored = window.desktopAPI?.loadSession
+    ? await window.desktopAPI.loadSession().catch(() => null)
+    : null;
+
+  if (hydrateFromSnapshot(restored)) {
+    render();
+    return;
+  }
+
   els.rawInput.value = sampleRawInput;
+  els.clashConfigInput.value = getDefaultConfigText();
+  seedDemoData();
+  render();
+  return;
   els.clashConfigInput.value = [
     "port: 7890",
     "socks-port: 7891",
