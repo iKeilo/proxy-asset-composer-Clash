@@ -1,5 +1,5 @@
 # Proxy Asset Composer
-<img url="https://img.ikeilo.de//i/2026/03/22/cb1myp.png" />
+<img src="cb1myp.png" />
 ## 项目简介
 
 `Proxy Asset Composer` 是一个面向代理配置编排的桌面原型工具。
