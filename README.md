@@ -220,15 +220,6 @@ npm.cmd run dist:all
 - 模板 `.db` 目前是原型结构文件，不是真正数据库
 - 当前仍以前端原型为主，尚未接入正式 Python 后端
 
-## 后续正式版方向
-
-后续正式版建议升级为：
-
-- 前端：`Vue3 + JavaScript`
-- 后端：`Python`
-- 持久层：真实数据库
-- 协议层：完整支持 `SS / VMess / VLESS / Trojan / Hysteria2 / Reality / SS-2022` 等主流协议
-- 导入导出：支持完整 Clash / Mihomo 配置可逆编辑
 
 ## 说明
 
