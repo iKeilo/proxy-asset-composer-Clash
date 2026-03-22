@@ -6,7 +6,7 @@
 
 它的目标不是只做“订阅转格式”，而是把节点、资产库、分流策略、规则、模板、配置文件导入导出放到同一个工作流里统一处理。
 
-当前版本基于 `Electron + HTML/CSS/JavaScript` 实现，是后续正式版 `Vue3 + JS + Python` 的交互与数据模型验证原型。
+基于 `Electron + HTML/CSS/JavaScript` 实现
 
 ## 当前项目结构
 
