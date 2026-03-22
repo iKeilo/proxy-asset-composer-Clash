@@ -426,6 +426,15 @@ function parseInlineProxyMap(line) {
   return result;
 }
 
+function cloneProxyFields(proxy) {
+  const fields = {};
+  Object.entries(proxy || {}).forEach(([key, value]) => {
+    if (key === "raw") return;
+    fields[key] = String(value);
+  });
+  return fields;
+}
+
 function buildAssetsFromImportedProxies(proxies) {
   const assetMap = new Map();
   proxies.forEach((proxy) => {
@@ -440,7 +449,8 @@ function buildAssetsFromImportedProxies(proxies) {
       port: proxy.port || "443",
       protocol: proxy.type || "ss",
       note: proxy.raw || "",
-      raw: proxy.raw || ""
+      raw: proxy.raw || "",
+      proxyFields: cloneProxyFields(proxy)
     });
   });
   return Array.from(assetMap.values());
@@ -868,15 +878,23 @@ function renderAssets() {
 
     const nodeList = card.querySelector(".asset-node-list");
     asset.nodes.forEach((node) => {
+      if (!node.proxyFields) {
+        node.proxyFields = {
+          name: node.name,
+          server: node.host,
+          port: String(node.port || "443"),
+          type: node.protocol || "ss"
+        };
+      }
       const row = els.assetNodeTemplate.content.firstElementChild.cloneNode(true);
       row.querySelector(".node-name").value = node.name;
       row.querySelector(".node-host").value = node.host;
       row.querySelector(".node-port").value = node.port;
       row.querySelector(".node-protocol").value = node.protocol.toUpperCase();
       row.querySelector(".node-note").value = node.note;
-      row.querySelector(".node-name").addEventListener("input", (event) => { node.name = event.target.value; renderOutput(); });
-      row.querySelector(".node-host").addEventListener("input", (event) => { node.host = event.target.value; renderOutput(); });
-      row.querySelector(".node-port").addEventListener("input", (event) => { node.port = event.target.value; renderOutput(); });
+      row.querySelector(".node-name").addEventListener("input", (event) => { node.name = event.target.value; node.proxyFields.name = node.name; renderOutput(); });
+      row.querySelector(".node-host").addEventListener("input", (event) => { node.host = event.target.value; node.proxyFields.server = node.host; renderOutput(); });
+      row.querySelector(".node-port").addEventListener("input", (event) => { node.port = event.target.value; node.proxyFields.port = String(node.port); renderOutput(); });
       row.querySelector(".node-note").addEventListener("input", (event) => { node.note = event.target.value; renderOutput(); });
       row.querySelector(".node-delete").addEventListener("click", () => { asset.nodes = asset.nodes.filter((item) => item.id !== node.id); render(); });
       nodeList.appendChild(row);
@@ -1097,12 +1115,14 @@ function formatClash(result) {
   lines.push("", "proxies:");
   state.assets.forEach((asset) => {
     asset.nodes.forEach((node) => {
-      const fields = [
-        `name: ${node.name}`,
-        `server: ${node.host || "test.test"}`,
-        `port: ${node.port || "443"}`,
-        `type: ${node.protocol || "ss"}`
-      ];
+      const fieldsMap = {
+        ...(node.proxyFields || {}),
+        name: node.name,
+        server: node.host || "test.test",
+        port: String(node.port || "443"),
+        type: node.protocol || "ss"
+      };
+      const fields = Object.entries(fieldsMap).map(([key, value]) => `${key}: ${yamlInlineValue(value)}`);
       lines.push(`  - {${fields.join(", ")}}`);
     });
   });
@@ -1158,6 +1178,13 @@ function render() {
 
 function yamlString(value) {
   return /[\s:[\]#]/.test(value) ? `"${String(value).replace(/"/g, '\\"')}"` : String(value);
+}
+
+function yamlInlineValue(value) {
+  const text = String(value ?? "");
+  if (/^(true|false|null)$/i.test(text)) return text.toLowerCase();
+  if (/^-?\d+(\.\d+)?$/.test(text)) return text;
+  return yamlString(text);
 }
 
 function indentBlock(text) {
