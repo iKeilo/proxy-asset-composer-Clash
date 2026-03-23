@@ -38,6 +38,7 @@ const templates = {
 };
 
 const allowedConstants = ["DIRECT", "REJECT"];
+const allowedProxyGroupTypes = ["select", "url-test", "fallback", "load-balance", "relay"];
 const defaultClashBaseRaw = [
   "port: 7890",
   "socks-port: 7891",
@@ -167,6 +168,82 @@ const els = {
   ruleTemplate: document.querySelector("#ruleTemplate")
 };
 
+function safeYamlLoad(text) {
+  if (!text || !String(text).trim()) return null;
+  try {
+    return window.jsyaml.load(text);
+  } catch {
+    return null;
+  }
+}
+
+function dumpYaml(value) {
+  if (value == null) return "";
+  return window.jsyaml.dump(value, {
+    lineWidth: -1,
+    noRefs: true,
+    quotingType: "\""
+  }).trim();
+}
+
+function dumpYamlFlow(value) {
+  if (value == null) return "";
+  return window.jsyaml.dump(value, {
+    lineWidth: -1,
+    noRefs: true,
+    quotingType: "\"",
+    flowLevel: 0
+  }).trim();
+}
+
+function dumpYamlBlock(value) {
+  const dumped = dumpYaml(value);
+  return dumped ? dumped.split(/\r?\n/) : [];
+}
+
+function normalizeYamlScalar(value) {
+  if (Array.isArray(value)) return value.map(normalizeYamlScalar);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, normalizeYamlScalar(item)]));
+  }
+  if (typeof value !== "string") return value;
+  if (/^(true|false)$/i.test(value)) return value.toLowerCase() === "true";
+  if (/^null$/i.test(value)) return null;
+  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
+  return value;
+}
+
+function buildProxyExportObject(node) {
+  const original = normalizeYamlScalar(node.proxyFields || {});
+  const proxy = { ...original };
+
+  if (node.name !== undefined && node.name !== null && String(node.name) !== String(original.name ?? "")) {
+    proxy.name = node.name;
+  } else if (!("name" in proxy)) {
+    proxy.name = node.name;
+  }
+
+  if (node.host !== undefined && node.host !== null && String(node.host) !== String(original.server ?? "")) {
+    proxy.server = node.host;
+  } else if (!("server" in proxy)) {
+    proxy.server = node.host || "test.test";
+  }
+
+  if (node.port !== undefined && node.port !== null && String(node.port) !== String(original.port ?? "")) {
+    proxy.port = Number(node.port);
+  } else if (!("port" in proxy)) {
+    proxy.port = Number(node.port || "443");
+  }
+
+  if (node.protocol && String(node.protocol) !== String(original.type ?? "")) {
+    proxy.type = node.protocol;
+  } else if (!("type" in proxy)) {
+    proxy.type = node.protocol || "ss";
+  }
+
+  return proxy;
+}
+
 function uid(prefix) {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -195,6 +272,10 @@ function normalizeRuleType(type) {
     "MATCH"
   ];
   return known.includes(type) ? type : "MATCH";
+}
+
+function normalizeProxyGroupType(type) {
+  return allowedProxyGroupTypes.includes(type) ? type : "select";
 }
 
 function toggleOverlay(el, open) {
@@ -430,7 +511,7 @@ function cloneProxyFields(proxy) {
   const fields = {};
   Object.entries(proxy || {}).forEach(([key, value]) => {
     if (key === "raw") return;
-    fields[key] = String(value);
+    fields[key] = value;
   });
   return fields;
 }
@@ -459,33 +540,54 @@ function buildAssetsFromImportedProxies(proxies) {
 function importProxyGroups(lines) {
   const drafts = [];
   let current = null;
-  let inProxies = false;
+  let listField = "";
+  let groupIndent = 0;
+  let listIndent = 0;
 
   lines.forEach((rawLine) => {
+    const indent = rawLine.match(/^\s*/)?.[0].length || 0;
     const line = rawLine.trim();
     if (!line) return;
-    if (line.startsWith("- name:")) {
+    if (/^- name:/.test(line)) {
       if (current) drafts.push(current);
       current = {
         id: uid("strategy"),
         name: line.split(":").slice(1).join(":").trim().replace(/^["']|["']$/g, ""),
         type: "select",
-        proxyNames: []
+        proxyNames: [],
+        providerRefs: []
       };
-      inProxies = false;
+      groupIndent = indent;
+      listField = "";
+      listIndent = 0;
       return;
     }
     if (!current) return;
-    if (line.startsWith("type:")) {
-      current.type = line.split(":").slice(1).join(":").trim();
+
+    if (indent <= groupIndent) {
+      listField = "";
+      listIndent = 0;
       return;
     }
-    if (line === "proxies:") {
-      inProxies = true;
+
+    if (indent === groupIndent + 2 && line.startsWith("type:")) {
+      current.type = normalizeProxyGroupType(line.split(":").slice(1).join(":").trim());
       return;
     }
-    if (inProxies && line.startsWith("- ")) {
+
+    if (indent === groupIndent + 2 && (line === "proxies:" || line === "use:")) {
+      listField = line.slice(0, -1);
+      listIndent = indent;
+      return;
+    }
+
+    if (listField === "proxies" && indent >= listIndent && line.startsWith("- ")) {
       current.proxyNames.push(line.slice(2).trim().replace(/^["']|["']$/g, ""));
+      return;
+    }
+
+    if (listField === "use" && indent >= listIndent && line.startsWith("- ")) {
+      current.providerRefs.push(line.slice(2).trim().replace(/^["']|["']$/g, ""));
     }
   });
 
@@ -498,7 +600,40 @@ function importProxyGroups(lines) {
   state.strategies = drafts.map((draft) => ({
     id: draft.id,
     name: draft.name,
+    type: normalizeProxyGroupType(draft.type),
+    providerRefs: Array.isArray(draft.providerRefs) ? draft.providerRefs : [],
+    members: draft.proxyNames.map((value) => ({
+      kind: allowedConstants.includes(value)
+        ? "constant"
+        : strategyNames.has(value)
+          ? "strategy"
+          : nodeNames.has(value)
+            ? "node"
+            : "node",
+      value
+    }))
+  }));
+}
+
+function importProxyGroupsFromConfig(groups) {
+  if (!Array.isArray(groups) || !groups.length) return;
+
+  const drafts = groups.map((group) => ({
+    id: uid("strategy"),
+    name: group.name || "未命名策略组",
+    type: normalizeProxyGroupType(group.type || "select"),
+    providerRefs: Array.isArray(group.use) ? group.use.map((item) => String(item)) : [],
+    proxyNames: Array.isArray(group.proxies) ? group.proxies.map((item) => String(item)) : []
+  }));
+
+  const strategyNames = new Set(drafts.map((item) => item.name));
+  const nodeNames = new Set(state.assets.flatMap((asset) => asset.nodes.map((node) => node.name)));
+
+  state.strategies = drafts.map((draft) => ({
+    id: draft.id,
+    name: draft.name,
     type: draft.type,
+    providerRefs: draft.providerRefs,
     members: draft.proxyNames.map((value) => ({
       kind: allowedConstants.includes(value)
         ? "constant"
@@ -513,6 +648,48 @@ function importProxyGroups(lines) {
 }
 
 function importClashConfig(text) {
+  const parsedConfig = safeYamlLoad(text);
+  if (parsedConfig && typeof parsedConfig === "object" && !Array.isArray(parsedConfig)) {
+    const baseConfig = { ...parsedConfig };
+    delete baseConfig.sniffer;
+    delete baseConfig["rule-providers"];
+    delete baseConfig.proxies;
+    delete baseConfig["proxy-groups"];
+    delete baseConfig.rules;
+
+    state.assets = [];
+    state.nodes = [];
+    state.strategies = [];
+    state.rulesConfig.rules = [];
+    state.clashBaseRaw = dumpYaml(baseConfig) || state.clashBaseRaw;
+    state.rulesConfig.snifferRaw = dumpYaml(parsedConfig.sniffer) || "";
+    state.rulesConfig.providersRaw = dumpYaml(parsedConfig["rule-providers"]) || "";
+
+    if (Array.isArray(parsedConfig.proxies) && parsedConfig.proxies.length) {
+      const proxies = parsedConfig.proxies.map((proxy) => ({
+        ...proxy,
+        raw: ""
+      }));
+      state.assets = buildAssetsFromImportedProxies(proxies);
+      state.nodes = state.assets.flatMap((asset) => asset.nodes);
+    }
+
+    importProxyGroupsFromConfig(parsedConfig["proxy-groups"]);
+
+    if (Array.isArray(parsedConfig.rules)) {
+      state.rulesConfig.rules = parsedConfig.rules.map((rule) => {
+        const parts = Array.isArray(rule) ? rule : String(rule).split(",");
+        const type = normalizeRuleType(String(parts[0] || "MATCH").trim());
+        const target = String(parts[parts.length - 1] || "节点选择").trim();
+        const value = parts.length > 2 ? parts.slice(1, -1).join(",").trim() : "";
+        ensureStrategyExists(target);
+        return { id: uid("rule"), type, value, target };
+      });
+    }
+
+    return;
+  }
+
   const lines = text.split(/\r?\n/);
   const snifferIndex = lines.findIndex((line) => /^sniffer:\s*$/.test(line.trim()));
   const providersIndex = lines.findIndex((line) => /^rule-providers:\s*$/.test(line.trim()));
@@ -1074,7 +1251,8 @@ function buildOutputModel() {
 
   const groups = state.strategies.map((strategy) => ({
     name: strategy.name,
-    type: strategy.type,
+    type: normalizeProxyGroupType(strategy.type),
+    use: Array.isArray(strategy.providerRefs) ? strategy.providerRefs.filter(Boolean) : [],
     proxies: strategy.members.flatMap((member) => resolveMember(member, strategy.name))
   }));
 
@@ -1103,45 +1281,47 @@ function renderValidation(errors) {
 }
 
 function formatClash(result) {
-  const lines = [
-    state.clashBaseRaw,
-    "",
-    "sniffer:",
-    ...indentBlock(state.rulesConfig.snifferRaw),
-    "",
-    "rule-providers:",
-    ...indentBlock(state.rulesConfig.providersRaw)
-  ];
-  lines.push("", "proxies:");
-  state.assets.forEach((asset) => {
-    asset.nodes.forEach((node) => {
-      const fieldsMap = {
-        ...(node.proxyFields || {}),
-        name: node.name,
-        server: node.host || "test.test",
-        port: String(node.port || "443"),
-        type: node.protocol || "ss"
-      };
-      const fields = Object.entries(fieldsMap).map(([key, value]) => `${key}: ${yamlInlineValue(value)}`);
-      lines.push(`  - {${fields.join(", ")}}`);
-    });
-  });
-  lines.push("", "proxy-groups:");
-  result.groups.forEach((group) => {
-    lines.push(`  - name: ${yamlString(group.name)}`);
-    lines.push(`    type: ${group.type}`);
+  const config = safeYamlLoad(state.clashBaseRaw) || {};
+  const sniffer = safeYamlLoad(state.rulesConfig.snifferRaw);
+  const ruleProviders = safeYamlLoad(state.rulesConfig.providersRaw);
+  const proxyList = state.assets.flatMap((asset) => asset.nodes.map((node) => buildProxyExportObject(node)));
+  const proxyGroups = result.groups.map((group) => {
+    const out = {
+      name: group.name,
+      type: group.type
+    };
     if (group.type === "url-test") {
-      lines.push("    url: http://www.gstatic.com/generate_204");
-      lines.push("    interval: 600");
+      out.url = "http://www.gstatic.com/generate_204";
+      out.interval = 600;
     }
-    lines.push("    proxies:");
-    group.proxies.forEach((proxy) => lines.push(`      - ${yamlString(proxy)}`));
+    if (group.use.length) out.use = group.use;
+    if (group.proxies.length) out.proxies = group.proxies;
+    return out;
   });
+  const rules = state.rulesConfig.rules.map((rule) => [rule.type, rule.value, rule.target].filter(Boolean).join(","));
+
+  config.sniffer = sniffer || {};
+  config["rule-providers"] = ruleProviders || {};
+  delete config.proxies;
+  delete config["proxy-groups"];
+  delete config.rules;
+
+  const lines = [
+    ...dumpYamlBlock(config),
+    "",
+    "proxies:"
+  ];
+
+  proxyList.forEach((proxy) => {
+    lines.push(`  - ${dumpYamlFlow(proxy)}`);
+  });
+
+  lines.push("", "proxy-groups:");
+  dumpYamlBlock(proxyGroups).forEach((line) => lines.push(`  ${line}`));
   lines.push("", "rules:");
-  state.rulesConfig.rules.forEach((rule) => {
-    lines.push(`  - ${[rule.type, rule.value, rule.target].filter(Boolean).join(",")}`);
-  });
-  return lines.join("\n");
+  dumpYamlBlock(rules).forEach((line) => lines.push(`  ${line}`));
+
+  return lines.join("\n").trim();
 }
 
 function formatSurge(result) {
@@ -1182,6 +1362,9 @@ function yamlString(value) {
 
 function yamlInlineValue(value) {
   const text = String(value ?? "");
+  if ((text.startsWith("{") && text.endsWith("}")) || (text.startsWith("[") && text.endsWith("]"))) {
+    return text;
+  }
   if (/^(true|false|null)$/i.test(text)) return text.toLowerCase();
   if (/^-?\d+(\.\d+)?$/.test(text)) return text;
   return yamlString(text);
