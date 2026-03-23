@@ -201,6 +201,29 @@ function dumpYamlBlock(value) {
   return dumped ? dumped.split(/\r?\n/) : [];
 }
 
+function isNumericString(value) {
+  return /^-?\d+(\.\d+)?$/.test(value);
+}
+
+function yamlInlineScalar(value, key = "") {
+  if (value === null) return "null";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") return String(value);
+  if (Array.isArray(value)) return `[${value.map((item) => yamlInlineScalar(item)).join(", ")}]`;
+  if (value && typeof value === "object") return `{${Object.entries(value).map(([k, v]) => `${k}: ${yamlInlineScalar(v, k)}`).join(", ")}}`;
+
+  const text = String(value);
+  if (key === "short-id") return `"${text.replace(/"/g, '\\"')}"`;
+  if (/^(true|false|null)$/i.test(text)) return `"${text}"`;
+  if (isNumericString(text)) return `"${text}"`;
+  if (/[\s,:{}[\]#]|^$/.test(text)) return `"${text.replace(/"/g, '\\"')}"`;
+  return text;
+}
+
+function formatInlineProxy(proxy) {
+  return `{${Object.entries(proxy).map(([key, value]) => `${key}: ${yamlInlineScalar(value, key)}`).join(", ")}}`;
+}
+
 function normalizeYamlScalar(value) {
   if (Array.isArray(value)) return value.map(normalizeYamlScalar);
   if (value && typeof value === "object") {
@@ -309,6 +332,148 @@ function decodeSafe(value) {
   }
 }
 
+function regionFlag(name) {
+  const pairs = [
+    ["香港", "🇭🇰"],
+    ["HK", "🇭🇰"],
+    ["美国", "🇺🇸"],
+    ["US", "🇺🇸"],
+    ["英国", "🇬🇧"],
+    ["UK", "🇬🇧"],
+    ["台湾", "🇹🇼"],
+    ["TW", "🇹🇼"],
+    ["日本", "🇯🇵"],
+    ["JP", "🇯🇵"],
+    ["新加坡", "🇸🇬"],
+    ["SG", "🇸🇬"],
+    ["韩国", "🇰🇷"],
+    ["KR", "🇰🇷"],
+    ["德国", "🇩🇪"],
+    ["DE", "🇩🇪"],
+    ["法国", "🇫🇷"],
+    ["FR", "🇫🇷"]
+  ];
+  const hit = pairs.find(([token]) => name.includes(token));
+  return hit ? hit[1] : "";
+}
+
+function withRegionFlag(name) {
+  if (!name) return name;
+  if (/^[\uD83C-\uDBFF\uDC00-\uDFFF]/.test(name)) return name;
+  const flag = regionFlag(name);
+  return flag ? `${flag} ${name}` : name;
+}
+
+function parseUrlParts(line) {
+  const [scheme] = line.split("://");
+  const raw = line.slice(`${scheme}://`.length);
+  const [beforeHash, hash = ""] = raw.split("#");
+  const [beforeQuery, queryString = ""] = beforeHash.split("?");
+  return {
+    scheme,
+    beforeQuery,
+    params: new URLSearchParams(queryString),
+    name: withRegionFlag(decodeSafe((hash || guessName(line, scheme)).trim()))
+  };
+}
+
+function parseVlessNode(line) {
+  const { beforeQuery, params, name } = parseUrlParts(line);
+  const [userInfo = "", hostPort = ""] = beforeQuery.split("@");
+  const [host = "example.com", port = "443"] = hostPort.split(":");
+  const security = params.get("security");
+  const sni = params.get("sni") || params.get("servername") || "";
+  const fp = params.get("fp") || params.get("client-fingerprint") || "";
+  const pbk = params.get("pbk") || "";
+  const sid = params.get("sid") || "";
+  const node = {
+    id: uid("node"),
+    name,
+    host,
+    port,
+    protocol: "vless",
+    note: buildTags(name, "vless", line).join(" / "),
+    region: guessRegion(name),
+    raw: line,
+    proxyFields: {
+      name,
+      server: host,
+      port: Number(port),
+      type: "vless",
+      uuid: userInfo,
+      tls: true,
+      tfo: false,
+      "skip-cert-verify": false,
+      network: params.get("type") || "tcp"
+    }
+  };
+
+  if (params.get("flow")) node.proxyFields.flow = params.get("flow");
+  if (sni) node.proxyFields.servername = sni;
+  if (fp) node.proxyFields["client-fingerprint"] = fp;
+  if (security === "reality") {
+    node.proxyFields["reality-opts"] = {
+      "public-key": pbk,
+      "short-id": sid
+    };
+  } else if (security === "tls") {
+    node.proxyFields.tls = true;
+  }
+
+  return node;
+}
+
+function parseTrojanNode(line) {
+  const { beforeQuery, params, name } = parseUrlParts(line);
+  const [password = "", hostPort = ""] = beforeQuery.split("@");
+  const [host = "example.com", port = "443"] = hostPort.split(":");
+  return {
+    id: uid("node"),
+    name,
+    host,
+    port,
+    protocol: "trojan",
+    note: buildTags(name, "trojan", line).join(" / "),
+    region: guessRegion(name),
+    raw: line,
+    proxyFields: {
+      name,
+      server: host,
+      port: Number(port),
+      type: "trojan",
+      password,
+      sni: params.get("sni") || undefined,
+      "skip-cert-verify": false
+    }
+  };
+}
+
+function parseHysteria2Node(line) {
+  const { beforeQuery, params, name } = parseUrlParts(line);
+  const [password = "", hostPort = ""] = beforeQuery.split("@");
+  const [host = "example.com", port = "443"] = hostPort.split(":");
+  return {
+    id: uid("node"),
+    name,
+    host,
+    port,
+    protocol: "hysteria2",
+    note: buildTags(name, "hysteria2", line).join(" / "),
+    region: guessRegion(name),
+    raw: line,
+    proxyFields: {
+      name,
+      server: host,
+      port: Number(port),
+      type: "hysteria2",
+      password,
+      auth: password,
+      sni: params.get("sni") || undefined,
+      "skip-cert-verify": false
+    }
+  };
+}
+
 function guessName(line, scheme) {
   if (scheme === "vmess") {
     try {
@@ -363,16 +528,25 @@ function buildTags(name, scheme, line) {
 
 function parseNodeLine(line) {
   const [scheme] = line.split("://");
+  if (scheme === "vless") return parseVlessNode(line);
+  if (scheme === "trojan") return parseTrojanNode(line);
+  if (scheme === "hysteria2") return parseHysteria2Node(line);
   const name = decodeSafe((line.split("#")[1] || guessName(line, scheme)).trim());
   return {
     id: uid("node"),
-    name,
+    name: withRegionFlag(name),
     host: guessHost(line),
     port: guessPort(line),
     protocol: scheme,
     note: buildTags(name, scheme, line).join(" / "),
     region: guessRegion(name),
-    raw: line
+    raw: line,
+    proxyFields: {
+      name: withRegionFlag(name),
+      server: guessHost(line),
+      port: Number(guessPort(line)),
+      type: scheme
+    }
   };
 }
 
@@ -392,6 +566,57 @@ function seedAssetsFromNodes() {
     grouped.get(node.region).nodes.push({ ...node });
   });
   state.assets = Array.from(grouped.values());
+}
+
+function appendNodesToAssets(nodes) {
+  const assetMap = new Map(state.assets.map((asset) => [asset.name, asset]));
+  const existingNames = new Set(
+    state.assets.flatMap((asset) => asset.nodes.map((node) => String(node.name)))
+  );
+  nodes.forEach((node) => {
+    let nextName = String(node.name || "未命名节点");
+    let suffix = 1;
+    while (existingNames.has(nextName)) {
+      nextName = `${node.name}${suffix}`;
+      suffix += 1;
+    }
+    if (nextName !== node.name) {
+      node.name = nextName;
+      if (node.proxyFields) node.proxyFields.name = nextName;
+    }
+
+    const assetName = node.region || guessRegion(node.name || "");
+    if (!assetMap.has(assetName)) {
+      const asset = { id: uid("asset"), name: assetName, kind: "region", nodes: [] };
+      state.assets.push(asset);
+      assetMap.set(assetName, asset);
+    }
+    const asset = assetMap.get(assetName);
+    asset.nodes.push(node);
+    existingNames.add(String(node.name));
+  });
+  state.nodes = state.assets.flatMap((asset) => asset.nodes);
+}
+
+function ensureUniqueNodeNamesAcrossAssets() {
+  const seen = new Set();
+  state.assets.forEach((asset) => {
+    asset.nodes.forEach((node) => {
+      const baseName = String(node.name || "未命名节点");
+      let nextName = baseName;
+      let suffix = 1;
+      while (seen.has(nextName)) {
+        nextName = `${baseName}${suffix}`;
+        suffix += 1;
+      }
+      if (nextName !== node.name) {
+        node.name = nextName;
+        if (node.proxyFields) node.proxyFields.name = nextName;
+      }
+      seen.add(nextName);
+    });
+  });
+  state.nodes = state.assets.flatMap((asset) => asset.nodes);
 }
 
 function applyTemplate(template) {
@@ -672,6 +897,7 @@ function importClashConfig(text) {
       }));
       state.assets = buildAssetsFromImportedProxies(proxies);
       state.nodes = state.assets.flatMap((asset) => asset.nodes);
+      ensureUniqueNodeNamesAcrossAssets();
     }
 
     importProxyGroupsFromConfig(parsedConfig["proxy-groups"]);
@@ -848,9 +1074,13 @@ function submitNodeImport() {
   const raw = els.nodeImportTextarea.value.trim();
   const asset = state.assets.find((item) => item.id === state.nodeModalAssetId);
   if (!raw || !asset) return;
-  const parsed = parseNodeLine(raw);
-  asset.nodes.push(parsed);
+  const parsedNodes = normalizeRawInput(raw);
+  parsedNodes.forEach((parsed) => {
+    const exists = asset.nodes.some((item) => item.name === parsed.name && String(item.host) === String(parsed.host) && String(item.port) === String(parsed.port));
+    if (!exists) asset.nodes.push(parsed);
+  });
   closeNodeModal();
+  ensureUniqueNodeNamesAcrossAssets();
   render();
 }
 
@@ -874,6 +1104,7 @@ function applyKeywordGrouping() {
     state.assets.push({ id: uid("asset"), name: assetName, kind: "custom", nodes: deduped });
   }
   closeKeywordGroupModal();
+  ensureUniqueNodeNamesAcrossAssets();
   render();
 }
 
@@ -990,7 +1221,9 @@ function bindEvents() {
   els.openKeywordGroupBtn.addEventListener("click", () => toggleOverlay(els.keywordGroupModal, true));
   els.closeKeywordGroupBtn.addEventListener("click", closeKeywordGroupModal);
   els.keywordGroupModal.querySelector(".config-overlay").addEventListener("click", closeKeywordGroupModal);
-  els.loadSampleBtn.addEventListener("click", () => { els.rawInput.value = sampleRawInput; });
+  if (els.loadSampleBtn) {
+    els.loadSampleBtn.addEventListener("click", () => { els.rawInput.value = sampleRawInput; });
+  }
   els.importTemplateBtn.addEventListener("click", () => els.templateFileInput.click());
   els.templateFileInput.addEventListener("change", async (event) => {
     const file = event.target.files?.[0];
@@ -1020,7 +1253,12 @@ function bindEvents() {
     render();
   });
   els.importClashConfigBtn.addEventListener("click", () => { importClashConfig(els.clashConfigInput.value); render(); });
-  els.normalizeBtn.addEventListener("click", () => { state.nodes = normalizeRawInput(els.rawInput.value); seedAssetsFromNodes(); render(); });
+  els.normalizeBtn.addEventListener("click", () => {
+    const parsedNodes = normalizeRawInput(els.rawInput.value);
+    appendNodesToAssets(parsedNodes);
+    ensureUniqueNodeNamesAcrossAssets();
+    render();
+  });
   els.exportTemplateBtn.addEventListener("click", exportTemplateDb);
   els.seedAssetsBtn.addEventListener("click", () => { if (!state.nodes.length) state.nodes = normalizeRawInput(els.rawInput.value); seedAssetsFromNodes(); render(); });
   els.addAssetBtn.addEventListener("click", () => { state.assets.push({ id: uid("asset"), name: "新资产库", kind: "custom", nodes: [] }); render(); });
@@ -1313,7 +1551,7 @@ function formatClash(result) {
   ];
 
   proxyList.forEach((proxy) => {
-    lines.push(`  - ${dumpYamlFlow(proxy)}`);
+    lines.push(`  - ${formatInlineProxy(proxy)}`);
   });
 
   lines.push("", "proxy-groups:");
@@ -1341,6 +1579,7 @@ function formatOutput(result) {
 }
 
 function renderOutput() {
+  ensureUniqueNodeNamesAcrossAssets();
   const result = buildOutputModel();
   els.resolveInfo.textContent = `已解析 ${result.totalResolvedNodes} 个叶子节点，${result.reusedStrategies} 个策略引用，${state.rulesConfig.rules.length} 条规则`;
   renderValidation(result.errors);
