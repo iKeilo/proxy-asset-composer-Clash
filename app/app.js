@@ -39,6 +39,7 @@ const templates = {
 
 const allowedConstants = ["DIRECT", "REJECT"];
 const allowedProxyGroupTypes = ["select", "url-test", "fallback", "load-balance", "relay"];
+const ruleTailOptions = new Set(["no-resolve", "src", "dst"]);
 const defaultClashBaseRaw = [
   "port: 7890",
   "socks-port: 7891",
@@ -104,6 +105,7 @@ const state = {
 };
 
 const els = {
+  appVersionLabel: document.querySelector("#appVersionLabel"),
   rawInput: document.querySelector("#rawInput"),
   clashConfigInput: document.querySelector("#clashConfigInput"),
   templateFileInput: document.querySelector("#templateFileInput"),
@@ -122,6 +124,7 @@ const els = {
   addStrategyBtn: document.querySelector("#addStrategyBtn"),
   loadTemplateBtn: document.querySelector("#loadTemplateBtn"),
   addProviderBtn: document.querySelector("#addProviderBtn"),
+  addRuleGroupBtn: document.querySelector("#addRuleGroupBtn"),
   addRuleBtn: document.querySelector("#addRuleBtn"),
   exportBtn: document.querySelector("#exportBtn"),
   targetFormat: document.querySelector("#targetFormat"),
@@ -177,13 +180,40 @@ function safeYamlLoad(text) {
   }
 }
 
+function normalizeYamlDumpText(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  const normalized = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const current = lines[i].replace(/^(\s*external-controller:\s*)"([^"]+)"\s*$/, "$1$2");
+    const sniffingMatch = current.match(/^(\s*)sniffing:\s*$/);
+    if (sniffingMatch) {
+      const baseIndent = sniffingMatch[1];
+      const items = [];
+      let cursor = i + 1;
+      while (cursor < lines.length) {
+        const nextLine = lines[cursor];
+        if (!nextLine.startsWith(`${baseIndent}  - `)) break;
+        items.push(nextLine.replace(/^\s*-\s*/, "").trim());
+        cursor += 1;
+      }
+      if (items.length) {
+        normalized.push(`${baseIndent}sniffing: [${items.join(", ")}]`);
+        i = cursor - 1;
+        continue;
+      }
+    }
+    normalized.push(current);
+  }
+  return normalized.join("\n").trim();
+}
+
 function dumpYaml(value) {
   if (value == null) return "";
-  return window.jsyaml.dump(value, {
+  return normalizeYamlDumpText(window.jsyaml.dump(value, {
     lineWidth: -1,
     noRefs: true,
     quotingType: "\""
-  }).trim();
+  }).trim());
 }
 
 function dumpYamlFlow(value) {
@@ -271,12 +301,91 @@ function uid(prefix) {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function strategyWithDefaults(strategy) {
+  return {
+    collapsed: true,
+    providerRefs: [],
+    members: [],
+    ...strategy
+  };
+}
+
+function ensureStrategyStateDefaults() {
+  state.strategies = state.strategies.map((strategy) => strategyWithDefaults(strategy));
+}
+
+function moveStrategyToIndex(strategyId, targetIndex) {
+  const fromIndex = state.strategies.findIndex((item) => item.id === strategyId);
+  if (fromIndex === -1) return;
+  const boundedTargetIndex = Math.max(0, Math.min(targetIndex, state.strategies.length - 1));
+  if (fromIndex === boundedTargetIndex) return;
+  const [moved] = state.strategies.splice(fromIndex, 1);
+  state.strategies.splice(boundedTargetIndex, 0, moved);
+  render();
+}
+
 function emptyNode(protocol = "ss") {
   return { id: uid("node"), name: "", host: "", port: "", protocol, note: "", raw: "" };
 }
 
 function emptyRule() {
   return { id: uid("rule"), type: "MATCH", value: "", target: "节点选择" };
+}
+
+function ruleWithDefaults(rule = {}) {
+  const target = rule.target || "节点选择";
+  return {
+    id: rule.id || uid("rule"),
+    type: rule.type || "MATCH",
+    value: rule.value || "",
+    target,
+    tails: Array.isArray(rule.tails) ? rule.tails.filter(Boolean) : [],
+    group: rule.group || target
+  };
+}
+
+function ensureRuleStateDefaults() {
+  state.rulesConfig.rules = (Array.isArray(state.rulesConfig.rules) ? state.rulesConfig.rules : []).map((rule) => ruleWithDefaults(rule));
+}
+
+function emptyRule(overrides = {}) {
+  return ruleWithDefaults({ type: "MATCH", value: "", target: "节点选择", ...overrides });
+}
+
+function getRuleGroupName(rule) {
+  return rule.group || rule.target || "未分组";
+}
+
+function buildRuleGroups() {
+  ensureRuleStateDefaults();
+  const groups = [];
+  const groupMap = new Map();
+  state.rulesConfig.rules.forEach((rule) => {
+    const groupName = getRuleGroupName(rule);
+    if (!groupMap.has(groupName)) {
+      const group = {
+        name: groupName,
+        rules: [],
+        targets: new Set(),
+        isCustom: false
+      };
+      groupMap.set(groupName, group);
+      groups.push(group);
+    }
+    const group = groupMap.get(groupName);
+    group.rules.push(rule);
+    if (rule.target) group.targets.add(rule.target);
+    if (groupName !== (rule.target || "")) group.isCustom = true;
+  });
+  return groups;
+}
+
+function createRuleGroupName(baseName = "新分组") {
+  const existing = new Set(buildRuleGroups().map((group) => group.name));
+  if (!existing.has(baseName)) return baseName;
+  let index = 1;
+  while (existing.has(`${baseName}${index}`)) index += 1;
+  return `${baseName}${index}`;
 }
 
 function normalizeRuleType(type) {
@@ -295,6 +404,23 @@ function normalizeRuleType(type) {
     "MATCH"
   ];
   return known.includes(type) ? type : "MATCH";
+}
+
+function splitRuleParts(rawValue) {
+  const sourceText = Array.isArray(rawValue)
+    ? rawValue.map((item) => String(item)).join(",")
+    : String(rawValue || "");
+  const normalizedText = sourceText.replace(/\s+#.*$/, "").trim();
+  const parts = normalizedText.split(",").map((item) => item.trim());
+  const type = normalizeRuleType(parts[0] || "MATCH");
+  const body = parts.slice(1);
+  const tails = [];
+  while (body.length > 1 && ruleTailOptions.has(String(body[body.length - 1] || "").toLowerCase())) {
+    tails.unshift(body.pop());
+  }
+  const target = String(body.pop() || "节点选择").trim();
+  const value = body.join(",").trim();
+  return { type, value, target, tails };
 }
 
 function normalizeProxyGroupType(type) {
@@ -623,24 +749,25 @@ function applyTemplate(template) {
   const existing = new Set(state.strategies.map((item) => item.name));
   template.strategies.forEach((strategy) => {
     if (existing.has(strategy.name)) return;
-    state.strategies.push({
+    state.strategies.push(strategyWithDefaults({
       id: uid("strategy"),
       name: strategy.name,
       type: strategy.type,
       members: strategy.members.map((member) => ({ ...member }))
-    });
+    }));
   });
 }
 
 function ensureStrategyExists(name) {
+  if (ruleTailOptions.has(String(name || "").toLowerCase())) return;
   if (!name || allowedConstants.includes(name)) return;
   if (state.strategies.some((item) => item.name === name)) return;
-  state.strategies.push({
+  state.strategies.push(strategyWithDefaults({
     id: uid("strategy"),
     name,
     type: "select",
     members: [{ kind: "constant", value: "DIRECT" }]
-  });
+  }));
 }
 
 function importRulesConfig(text) {
@@ -681,7 +808,7 @@ function importRulesConfig(text) {
       const type = normalizeRuleType(parts[0]?.trim() || "MATCH");
       const target = parts[parts.length - 1]?.trim() || "节点选择";
       const value = parts.length > 2 ? parts.slice(1, -1).join(",").trim() : "";
-      rules.push({ id: uid("rule"), type, value, target });
+      rules.push(ruleWithDefaults({ id: uid("rule"), type, value, target }));
       ensureStrategyExists(target);
     }
   });
@@ -822,7 +949,7 @@ function importProxyGroups(lines) {
   const strategyNames = new Set(drafts.map((item) => item.name));
   const nodeNames = new Set(state.assets.flatMap((asset) => asset.nodes.map((node) => node.name)));
 
-  state.strategies = drafts.map((draft) => ({
+  state.strategies = drafts.map((draft) => strategyWithDefaults({
     id: draft.id,
     name: draft.name,
     type: normalizeProxyGroupType(draft.type),
@@ -854,7 +981,7 @@ function importProxyGroupsFromConfig(groups) {
   const strategyNames = new Set(drafts.map((item) => item.name));
   const nodeNames = new Set(state.assets.flatMap((asset) => asset.nodes.map((node) => node.name)));
 
-  state.strategies = drafts.map((draft) => ({
+  state.strategies = drafts.map((draft) => strategyWithDefaults({
     id: draft.id,
     name: draft.name,
     type: draft.type,
@@ -909,7 +1036,7 @@ function importClashConfig(text) {
         const target = String(parts[parts.length - 1] || "节点选择").trim();
         const value = parts.length > 2 ? parts.slice(1, -1).join(",").trim() : "";
         ensureStrategyExists(target);
-        return { id: uid("rule"), type, value, target };
+        return ruleWithDefaults({ id: uid("rule"), type, value, target });
       });
     }
 
@@ -977,7 +1104,7 @@ function importClashConfig(text) {
       const type = normalizeRuleType(parts[0]?.trim() || "MATCH");
       const target = parts[parts.length - 1]?.trim() || "节点选择";
       const value = parts.length > 2 ? parts.slice(1, -1).join(",").trim() : "";
-      rules.push({ id: uid("rule"), type, value, target });
+      rules.push(ruleWithDefaults({ id: uid("rule"), type, value, target }));
       if (!knownStrategyNames.has(target)) ensureStrategyExists(target);
     });
     state.rulesConfig.rules = rules;
@@ -1048,12 +1175,12 @@ function hydrateFromSnapshot(snapshot) {
   state.lastSavedConfigPath = snapshot.lastSavedConfigPath || "";
   state.exportVersion = Number.isInteger(snapshot.exportVersion) ? snapshot.exportVersion : 0;
   state.assets = Array.isArray(snapshot.state.assets) ? snapshot.state.assets : [];
-  state.strategies = Array.isArray(snapshot.state.strategies) ? snapshot.state.strategies : [];
-  state.clashBaseRaw = snapshot.state.clashBaseRaw || defaultClashBaseRaw;
+  state.strategies = Array.isArray(snapshot.state.strategies) ? snapshot.state.strategies.map(strategyWithDefaults) : [];
+  state.clashBaseRaw = normalizeYamlDumpText(snapshot.state.clashBaseRaw || defaultClashBaseRaw);
   state.rulesConfig = {
-    snifferRaw: snapshot.state.rulesConfig?.snifferRaw || defaultSnifferRaw,
+    snifferRaw: normalizeYamlDumpText(snapshot.state.rulesConfig?.snifferRaw || defaultSnifferRaw),
     providersRaw: snapshot.state.rulesConfig?.providersRaw || defaultProvidersRaw,
-    rules: Array.isArray(snapshot.state.rulesConfig?.rules) ? snapshot.state.rulesConfig.rules : []
+    rules: Array.isArray(snapshot.state.rulesConfig?.rules) ? snapshot.state.rulesConfig.rules.map((rule) => ruleWithDefaults(rule)) : []
   };
   state.nodes = state.assets.flatMap((asset) => Array.isArray(asset.nodes) ? asset.nodes : []);
   els.rawInput.value = snapshot.rawInput || "";
@@ -1149,7 +1276,8 @@ async function exportCurrentConfig() {
   const finalName = /\.(yaml|yml|txt)$/i.test(baseName) ? baseName : `${baseName}.yaml`;
   if (window.desktopAPI?.saveConfigFile) {
     const targetPath = getPreferredSavePath(finalName);
-    const saved = await window.desktopAPI.saveConfigFile({ filePath: targetPath, content });
+    const saved = await window.desktopAPI.saveConfigFile({ defaultPath: targetPath, content });
+    if (!saved?.filePath) return;
     state.lastSavedConfigPath = saved.filePath;
     if (!state.importedConfigPath) state.importedConfigPath = saved.filePath;
     schedulePersist();
@@ -1170,10 +1298,10 @@ function importTemplateDb(text) {
     if (data.rulesConfig) {
       state.rulesConfig.snifferRaw = data.rulesConfig.snifferRaw || state.rulesConfig.snifferRaw;
       state.rulesConfig.providersRaw = data.rulesConfig.providersRaw || state.rulesConfig.providersRaw;
-      state.rulesConfig.rules = Array.isArray(data.rulesConfig.rules) ? data.rulesConfig.rules : [];
+      state.rulesConfig.rules = Array.isArray(data.rulesConfig.rules) ? data.rulesConfig.rules.map((rule) => ruleWithDefaults(rule)) : [];
     }
     if (Array.isArray(data.strategies)) {
-      state.strategies = data.strategies.map((strategy) => ({
+      state.strategies = data.strategies.map((strategy) => strategyWithDefaults({
         id: uid("strategy"),
         name: strategy.name,
         type: strategy.type || "select",
@@ -1262,14 +1390,26 @@ function bindEvents() {
   els.exportTemplateBtn.addEventListener("click", exportTemplateDb);
   els.seedAssetsBtn.addEventListener("click", () => { if (!state.nodes.length) state.nodes = normalizeRawInput(els.rawInput.value); seedAssetsFromNodes(); render(); });
   els.addAssetBtn.addEventListener("click", () => { state.assets.push({ id: uid("asset"), name: "新资产库", kind: "custom", nodes: [] }); render(); });
-  els.addStrategyBtn.addEventListener("click", () => { state.strategies.push({ id: uid("strategy"), name: "新策略层", type: "select", members: [{ kind: "constant", value: "DIRECT" }] }); render(); });
-  els.loadTemplateBtn.addEventListener("click", () => { applyTemplate(templates.basic); render(); });
+  els.addStrategyBtn.addEventListener("click", () => {
+    state.strategies.unshift(strategyWithDefaults({ id: uid("strategy"), name: "新策略层", type: "select", members: [{ kind: "constant", value: "DIRECT" }] }));
+    render();
+  });
+  if (els.loadTemplateBtn) {
+    els.loadTemplateBtn.addEventListener("click", () => { applyTemplate(templates.basic); render(); });
+  }
   els.addProviderBtn.addEventListener("click", () => {
     state.rulesConfig.providersRaw = `${state.rulesConfig.providersRaw}\n\nNewProvider:\n  type: http\n  behavior: classical\n  path: ./ruleset/NewProvider.yaml\n  url: ""\n  interval: 86400`.trim();
     renderRules();
     renderOutput();
   });
   els.addRuleBtn.addEventListener("click", () => { state.rulesConfig.rules.push(emptyRule()); ensureStrategyExists("节点选择"); renderRules(); renderOutput(); });
+  els.addRuleGroupBtn.addEventListener("click", () => {
+    const groupName = createRuleGroupName();
+    state.rulesConfig.rules.push(emptyRule({ group: groupName }));
+    ensureStrategyExists("节点选择");
+    renderRules();
+    renderOutput();
+  });
   els.submitNodeImportBtn.addEventListener("click", submitNodeImport);
   els.submitKeywordGroupBtn.addEventListener("click", applyKeywordGrouping);
   els.exportBtn.addEventListener("click", renderOutput);
@@ -1376,6 +1516,185 @@ function renderStrategies() {
   });
 }
 
+function renderStrategies() {
+  ensureStrategyStateDefaults();
+  els.strategyEditor.innerHTML = "";
+  state.strategies.forEach((strategy) => {
+    const card = els.strategyTemplate.content.firstElementChild.cloneNode(true);
+    const toggle = card.querySelector(".strategy-toggle");
+    const summary = card.querySelector(".strategy-summary");
+    const providerCount = Array.isArray(strategy.providerRefs) ? strategy.providerRefs.length : 0;
+    const isCollapsed = strategy.collapsed !== false;
+    card.dataset.strategyId = strategy.id;
+    card.classList.toggle("collapsed", isCollapsed);
+    card.querySelector(".strategy-name").value = strategy.name;
+    card.querySelector(".strategy-type").value = strategy.type;
+    card.querySelector(".strategy-help").textContent = getStrategyHelp(strategy.type);
+    summary.textContent = providerCount
+      ? `成员 ${strategy.members.length} 个，Provider ${providerCount} 个`
+      : `成员 ${strategy.members.length} 个`;
+    toggle.textContent = isCollapsed ? "展开" : "折叠";
+    toggle.addEventListener("click", () => {
+      strategy.collapsed = !isCollapsed;
+      render();
+    });
+    card.querySelector(".strategy-name").addEventListener("input", (event) => {
+      strategy.name = event.target.value.trim() || "未命名策略层";
+      render();
+    });
+    card.querySelector(".strategy-type").addEventListener("change", (event) => {
+      strategy.type = event.target.value;
+      render();
+    });
+    card.querySelector(".strategy-add-member").addEventListener("click", () => {
+      strategy.members.push({ kind: "constant", value: "DIRECT" });
+      strategy.collapsed = false;
+      render();
+    });
+    card.querySelector(".strategy-delete").addEventListener("click", () => {
+      state.strategies = state.strategies.filter((item) => item.id !== strategy.id);
+      render();
+    });
+    card.addEventListener("dragstart", (event) => {
+      if (!event.target.closest(".strategy-drag")) {
+        event.preventDefault();
+        return;
+      }
+      draggingStrategyId = strategy.id;
+      card.classList.add("dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", strategy.id);
+    });
+    card.addEventListener("dragend", () => {
+      draggingStrategyId = null;
+      card.classList.remove("dragging");
+      els.strategyEditor.querySelectorAll(".strategy-card").forEach((item) => item.classList.remove("drag-over"));
+    });
+    card.addEventListener("dragover", (event) => {
+      if (!draggingStrategyId || draggingStrategyId === strategy.id) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      card.classList.add("drag-over");
+    });
+    card.addEventListener("dragleave", () => {
+      card.classList.remove("drag-over");
+    });
+    card.addEventListener("drop", (event) => {
+      if (!draggingStrategyId || draggingStrategyId === strategy.id) return;
+      event.preventDefault();
+      card.classList.remove("drag-over");
+      moveStrategy(draggingStrategyId, strategy.id);
+    });
+
+    const memberList = card.querySelector(".strategy-member-list");
+    strategy.members.forEach((member, index) => {
+      const row = els.strategyMemberTemplate.content.firstElementChild.cloneNode(true);
+      const kindSelect = row.querySelector(".member-kind");
+      const valueSelect = row.querySelector(".member-value");
+      row.querySelector(".member-badge").textContent = `成员 ${index + 1}`;
+      kindSelect.value = member.kind;
+      fillMemberOptions(valueSelect, member.kind, strategy.name);
+      valueSelect.value = member.value;
+      kindSelect.addEventListener("change", (event) => {
+        member.kind = event.target.value;
+        member.value = getMemberOptions(member.kind, strategy.name)[0]?.value || "";
+        render();
+      });
+      valueSelect.addEventListener("change", (event) => {
+        member.value = event.target.value;
+        renderOutput();
+      });
+      row.querySelector(".member-delete").addEventListener("click", () => {
+        if (strategy.members.length === 1) return;
+        strategy.members.splice(index, 1);
+        render();
+      });
+      memberList.appendChild(row);
+    });
+
+    els.strategyEditor.appendChild(card);
+  });
+}
+
+function renderStrategies() {
+  ensureStrategyStateDefaults();
+  els.strategyEditor.innerHTML = "";
+  state.strategies.forEach((strategy) => {
+    const card = els.strategyTemplate.content.firstElementChild.cloneNode(true);
+    const toggle = card.querySelector(".strategy-toggle");
+    const summary = card.querySelector(".strategy-summary");
+    const moveTopBtn = card.querySelector(".strategy-move-top");
+    const moveUpBtn = card.querySelector(".strategy-move-up");
+    const moveDownBtn = card.querySelector(".strategy-move-down");
+    const providerCount = Array.isArray(strategy.providerRefs) ? strategy.providerRefs.length : 0;
+    const isCollapsed = strategy.collapsed !== false;
+    const strategyIndex = state.strategies.findIndex((item) => item.id === strategy.id);
+    card.classList.toggle("collapsed", isCollapsed);
+    card.querySelector(".strategy-name").value = strategy.name;
+    card.querySelector(".strategy-type").value = strategy.type;
+    card.querySelector(".strategy-help").textContent = getStrategyHelp(strategy.type);
+    summary.textContent = providerCount
+      ? `成员 ${strategy.members.length} 个，Provider ${providerCount} 个`
+      : `成员 ${strategy.members.length} 个`;
+    toggle.textContent = isCollapsed ? "展开" : "折叠";
+    moveTopBtn.disabled = strategyIndex <= 0;
+    moveUpBtn.disabled = strategyIndex <= 0;
+    moveDownBtn.disabled = strategyIndex === -1 || strategyIndex >= state.strategies.length - 1;
+    moveTopBtn.addEventListener("click", () => moveStrategyToIndex(strategy.id, 0));
+    moveUpBtn.addEventListener("click", () => moveStrategyToIndex(strategy.id, strategyIndex - 1));
+    moveDownBtn.addEventListener("click", () => moveStrategyToIndex(strategy.id, strategyIndex + 1));
+    toggle.addEventListener("click", () => {
+      strategy.collapsed = !isCollapsed;
+      render();
+    });
+    card.querySelector(".strategy-name").addEventListener("input", (event) => {
+      strategy.name = event.target.value.trim() || "未命名策略层";
+      render();
+    });
+    card.querySelector(".strategy-type").addEventListener("change", (event) => {
+      strategy.type = event.target.value;
+      render();
+    });
+    card.querySelector(".strategy-add-member").addEventListener("click", () => {
+      strategy.members.push({ kind: "constant", value: "DIRECT" });
+      strategy.collapsed = false;
+      render();
+    });
+    card.querySelector(".strategy-delete").addEventListener("click", () => {
+      state.strategies = state.strategies.filter((item) => item.id !== strategy.id);
+      render();
+    });
+
+    const memberList = card.querySelector(".strategy-member-list");
+    strategy.members.forEach((member, index) => {
+      const row = els.strategyMemberTemplate.content.firstElementChild.cloneNode(true);
+      const kindSelect = row.querySelector(".member-kind");
+      const valueSelect = row.querySelector(".member-value");
+      row.querySelector(".member-badge").textContent = `成员 ${index + 1}`;
+      kindSelect.value = member.kind;
+      fillMemberOptions(valueSelect, member.kind, strategy.name);
+      valueSelect.value = member.value;
+      kindSelect.addEventListener("change", (event) => {
+        member.kind = event.target.value;
+        member.value = getMemberOptions(member.kind, strategy.name)[0]?.value || "";
+        render();
+      });
+      valueSelect.addEventListener("change", (event) => {
+        member.value = event.target.value;
+        renderOutput();
+      });
+      row.querySelector(".member-delete").addEventListener("click", () => {
+        if (strategy.members.length === 1) return;
+        strategy.members.splice(index, 1);
+        render();
+      });
+      memberList.appendChild(row);
+    });
+
+    els.strategyEditor.appendChild(card);
+  });
+}
+
 function renderSnifferSummary() {
   els.snifferSummary.innerHTML = "";
   const card = document.createElement("div");
@@ -1434,6 +1753,108 @@ function renderRuleList() {
     row.querySelector(".rule-target").addEventListener("input", (event) => { rule.target = event.target.value; ensureStrategyExists(rule.target); render(); });
     row.querySelector(".rule-delete").addEventListener("click", () => { state.rulesConfig.rules = state.rulesConfig.rules.filter((item) => item.id !== rule.id); renderRules(); renderOutput(); });
     els.rulesEditor.appendChild(row);
+  });
+}
+
+function renderRules() {
+  renderSnifferSummary();
+  renderSnifferEditor();
+  renderProvidersSummary();
+  renderProvidersEditor();
+  renderRuleList();
+}
+
+function formatRuleLine(rule) {
+  return [rule.type, rule.value, rule.target, ...(Array.isArray(rule.tails) ? rule.tails : [])].filter(Boolean).join(",");
+}
+
+function renderRuleList() {
+  ensureRuleStateDefaults();
+  els.rulesEditor.innerHTML = "";
+  buildRuleGroups().forEach((group) => {
+    const card = document.createElement("section");
+    card.className = "rule-group";
+
+    const head = document.createElement("div");
+    head.className = "rule-group-head";
+
+    const meta = document.createElement("div");
+    meta.className = "rule-group-meta";
+
+    const groupInput = document.createElement("input");
+    groupInput.value = group.name;
+    groupInput.placeholder = "分组名称";
+    groupInput.addEventListener("change", (event) => {
+      const nextName = event.target.value.trim();
+      const normalizedName = nextName || group.rules[0]?.target || "未分组";
+      group.rules.forEach((rule) => {
+        rule.group = normalizedName;
+      });
+      renderRules();
+      renderOutput();
+    });
+
+    const targetSummary = document.createElement("div");
+    targetSummary.className = "rule-group-targets";
+    targetSummary.textContent = `目标策略：${Array.from(group.targets).filter(Boolean).join(" / ") || "未设置"} · ${group.rules.length} 条`;
+
+    meta.append(groupInput, targetSummary);
+
+    const actions = document.createElement("div");
+    actions.className = "rule-group-actions";
+
+    const addRuleBtn = document.createElement("button");
+    addRuleBtn.type = "button";
+    addRuleBtn.className = "ghost";
+    addRuleBtn.textContent = "新增规则";
+    addRuleBtn.addEventListener("click", () => {
+      state.rulesConfig.rules.push(emptyRule({
+        target: group.rules[0]?.target || "节点选择",
+        group: group.name
+      }));
+      renderRules();
+      renderOutput();
+    });
+
+    actions.appendChild(addRuleBtn);
+    head.append(meta, actions);
+
+    const body = document.createElement("div");
+    body.className = "rule-group-body";
+
+    group.rules.forEach((rule) => {
+      const row = els.ruleTemplate.content.firstElementChild.cloneNode(true);
+      row.querySelector(".rule-type").value = rule.type;
+      row.querySelector(".rule-value").value = rule.value;
+      row.querySelector(".rule-target").value = rule.target;
+      row.querySelector(".rule-type").addEventListener("change", (event) => {
+        rule.type = event.target.value;
+        renderOutput();
+      });
+      row.querySelector(".rule-value").addEventListener("input", (event) => {
+        rule.value = event.target.value;
+        renderOutput();
+      });
+      row.querySelector(".rule-target").addEventListener("change", (event) => {
+        const previousTarget = rule.target;
+        rule.target = event.target.value.trim();
+        if (!rule.group || rule.group === previousTarget) {
+          rule.group = rule.target || "未分组";
+        }
+        ensureStrategyExists(rule.target);
+        renderRules();
+        renderOutput();
+      });
+      row.querySelector(".rule-delete").addEventListener("click", () => {
+        state.rulesConfig.rules = state.rulesConfig.rules.filter((item) => item.id !== rule.id);
+        renderRules();
+        renderOutput();
+      });
+      body.appendChild(row);
+    });
+
+    card.append(head, body);
+    els.rulesEditor.appendChild(card);
   });
 }
 
@@ -1574,6 +1995,83 @@ function formatSurge(result) {
   return lines.join("\n");
 }
 
+function renderValidation(errors) {
+  const firstError = Array.isArray(errors) && errors.length ? errors[0] : "";
+  els.validationPanel.textContent = firstError ? `Error: ${firstError}` : "";
+  els.validationPanel.classList.toggle("has-error", Boolean(firstError));
+}
+
+function appendFormattedRules(lines) {
+  buildRuleGroups().forEach((group) => {
+    if (group.isCustom && group.name) {
+      lines.push(`  #${group.name}`);
+    }
+    group.rules.forEach((rule) => {
+      lines.push(`  - ${formatRuleLine(rule)}`);
+    });
+  });
+}
+
+function formatClash(result) {
+  const config = safeYamlLoad(state.clashBaseRaw) || {};
+  const sniffer = safeYamlLoad(state.rulesConfig.snifferRaw);
+  const ruleProviders = safeYamlLoad(state.rulesConfig.providersRaw);
+  const proxyList = state.assets.flatMap((asset) => asset.nodes.map((node) => buildProxyExportObject(node)));
+  const proxyGroups = result.groups.map((group) => {
+    const out = {
+      name: group.name,
+      type: group.type
+    };
+    if (group.type === "url-test") {
+      out.url = "http://www.gstatic.com/generate_204";
+      out.interval = 600;
+    }
+    if (group.use.length) out.use = group.use;
+    if (group.proxies.length) out.proxies = group.proxies;
+    return out;
+  });
+
+  config.sniffer = sniffer || {};
+  config["rule-providers"] = ruleProviders || {};
+  delete config.proxies;
+  delete config["proxy-groups"];
+  delete config.rules;
+
+  const lines = [
+    ...dumpYamlBlock(config),
+    "",
+    "proxies:"
+  ];
+
+  proxyList.forEach((proxy) => {
+    lines.push(`  - ${formatInlineProxy(proxy)}`);
+  });
+
+  lines.push("", "proxy-groups:");
+  dumpYamlBlock(proxyGroups).forEach((line) => lines.push(`  ${line}`));
+  lines.push("", "rules:");
+  appendFormattedRules(lines);
+
+  return lines.join("\n").trim();
+}
+
+function formatSurge(result) {
+  const lines = ["[Proxy Group]"];
+  result.groups.forEach((group) => {
+    lines.push(`${group.name} = ${group.type}, ${group.proxies.join(", ")}`);
+  });
+  lines.push("", "[Rule]");
+  buildRuleGroups().forEach((group) => {
+    if (group.isCustom && group.name) {
+      lines.push(`#${group.name}`);
+    }
+    group.rules.forEach((rule) => {
+      lines.push(formatRuleLine(rule));
+    });
+  });
+  return lines.join("\n");
+}
+
 function formatOutput(result) {
   return els.targetFormat.value === "surge" ? formatSurge(result) : formatClash(result);
 }
@@ -1620,8 +2118,722 @@ function escapeHtml(text) {
     .replace(/>/g, "&gt;");
 }
 
+function ruleGroupWithDefaults(group = {}) {
+  return {
+    id: group.id || uid("rule-group"),
+    name: group.name || "",
+    collapsed: group.collapsed !== false,
+    emitComment: Boolean(group.emitComment),
+    commentLines: Array.isArray(group.commentLines) ? group.commentLines.filter(Boolean) : [],
+    ruleIds: Array.isArray(group.ruleIds)
+      ? group.ruleIds.filter(Boolean)
+      : Array.isArray(group.rules)
+        ? group.rules.map((item) => typeof item === "string" ? item : item?.id).filter(Boolean)
+        : []
+  };
+}
+
+function getRuleById(ruleId) {
+  return state.rulesConfig.rules.find((rule) => rule.id === ruleId) || null;
+}
+
+function getRulesForGroup(group) {
+  return (group.ruleIds || []).map((ruleId) => getRuleById(ruleId)).filter(Boolean);
+}
+
+function buildSequentialRuleGroups(rules) {
+  const groups = [];
+  let currentGroup = null;
+  rules.forEach((rule) => {
+    const groupName = rule.group || rule.target || "未分组";
+    const emitComment = Boolean(rule.group && rule.group !== rule.target);
+    if (!currentGroup || currentGroup.emitComment !== emitComment || currentGroup.name !== groupName) {
+      currentGroup = ruleGroupWithDefaults({
+        id: uid("rule-group"),
+        name: groupName,
+        collapsed: true,
+        emitComment,
+        commentLines: [],
+        ruleIds: []
+      });
+      groups.push(currentGroup);
+    }
+    currentGroup.ruleIds.push(rule.id);
+    rule.groupId = currentGroup.id;
+    rule.group = currentGroup.emitComment ? currentGroup.name : (rule.target || currentGroup.name || "未分组");
+  });
+  return groups;
+}
+
+function syncRulesArrayFromGroups() {
+  ensureRuleStateDefaults();
+  state.rulesConfig.ruleGroups = Array.isArray(state.rulesConfig.ruleGroups)
+    ? state.rulesConfig.ruleGroups.map((group) => ruleGroupWithDefaults(group))
+    : [];
+  const ruleMap = new Map(state.rulesConfig.rules.map((rule) => [rule.id, rule]));
+  const orderedRules = [];
+  const assigned = new Set();
+
+  state.rulesConfig.ruleGroups.forEach((group) => {
+    group.ruleIds = group.ruleIds.filter((ruleId) => ruleMap.has(ruleId));
+    group.ruleIds.forEach((ruleId) => {
+      const rule = ruleMap.get(ruleId);
+      if (!rule) return;
+      rule.groupId = group.id;
+      rule.group = group.emitComment ? (group.name || rule.target || "未分组") : (rule.target || group.name || "未分组");
+      orderedRules.push(rule);
+      assigned.add(ruleId);
+    });
+  });
+
+  state.rulesConfig.rules.forEach((rule) => {
+    if (assigned.has(rule.id)) return;
+    const fallbackGroup = ruleGroupWithDefaults({
+      id: uid("rule-group"),
+      name: rule.target || "未分组",
+      collapsed: true,
+      emitComment: false,
+      ruleIds: [rule.id]
+    });
+    fallbackGroup.ruleIds = [rule.id];
+    state.rulesConfig.ruleGroups.push(fallbackGroup);
+    rule.groupId = fallbackGroup.id;
+    rule.group = rule.target || "未分组";
+    orderedRules.push(rule);
+  });
+
+  state.rulesConfig.ruleGroups = state.rulesConfig.ruleGroups.filter((group) => group.ruleIds.length);
+  state.rulesConfig.rules = orderedRules;
+}
+
+function ensureRuleGroupingState() {
+  ensureRuleStateDefaults();
+  if (!Array.isArray(state.rulesConfig.ruleGroups) || !state.rulesConfig.ruleGroups.length) {
+    state.rulesConfig.ruleGroups = buildSequentialRuleGroups(state.rulesConfig.rules);
+  } else {
+    state.rulesConfig.ruleGroups = state.rulesConfig.ruleGroups.map((group) => ruleGroupWithDefaults(group));
+  }
+
+  syncRulesArrayFromGroups();
+
+  state.rulesConfig.ruleGroups.forEach((group) => {
+    if (!group.emitComment) {
+      const rules = getRulesForGroup(group);
+      const commonTarget = rules.length && rules.every((rule) => rule.target === rules[0].target)
+        ? rules[0].target
+        : rules[0]?.target || group.name || "未分组";
+      group.name = commonTarget || "未分组";
+    }
+  });
+
+  syncRulesArrayFromGroups();
+}
+
+function buildRuleGroups() {
+  ensureRuleGroupingState();
+  return state.rulesConfig.ruleGroups.map((group) => {
+    const rules = getRulesForGroup(group);
+    return {
+      ...group,
+      rules,
+      targets: Array.from(new Set(rules.map((rule) => rule.target).filter(Boolean)))
+    };
+  });
+}
+
+function createRuleGroupName(baseName = "新分组") {
+  const existing = new Set(buildRuleGroups().map((group) => group.name));
+  if (!existing.has(baseName)) return baseName;
+  let index = 1;
+  while (existing.has(`${baseName}${index}`)) index += 1;
+  return `${baseName}${index}`;
+}
+
+function findRuleGroupIndex(groupId) {
+  return state.rulesConfig.ruleGroups.findIndex((group) => group.id === groupId);
+}
+
+function moveRuleGroupToIndex(groupId, targetIndex) {
+  ensureRuleGroupingState();
+  const fromIndex = findRuleGroupIndex(groupId);
+  if (fromIndex === -1) return;
+  const boundedTargetIndex = Math.max(0, Math.min(targetIndex, state.rulesConfig.ruleGroups.length - 1));
+  if (fromIndex === boundedTargetIndex) return;
+  const [moved] = state.rulesConfig.ruleGroups.splice(fromIndex, 1);
+  state.rulesConfig.ruleGroups.splice(boundedTargetIndex, 0, moved);
+  syncRulesArrayFromGroups();
+  renderRules();
+  renderOutput();
+}
+
+function removeEmptyRuleGroups() {
+  state.rulesConfig.ruleGroups = state.rulesConfig.ruleGroups.filter((group) => group.ruleIds.length);
+}
+
+function createRuleGroupAtTop({ name, emitComment, target = "节点选择" }) {
+  ensureRuleGroupingState();
+  const group = ruleGroupWithDefaults({
+    id: uid("rule-group"),
+    name: emitComment ? name : target,
+    collapsed: false,
+    emitComment,
+    commentLines: emitComment ? [name] : [],
+    ruleIds: []
+  });
+  const rule = ruleWithDefaults({
+    id: uid("rule"),
+    type: "MATCH",
+    value: "",
+    target,
+    group: emitComment ? name : target
+  });
+  rule.groupId = group.id;
+  group.ruleIds.unshift(rule.id);
+  state.rulesConfig.ruleGroups.unshift(group);
+  state.rulesConfig.rules.unshift(rule);
+  ensureStrategyExists(target);
+  syncRulesArrayFromGroups();
+  renderRules();
+  renderOutput();
+}
+
+function extractRulesSectionLines(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  const rulesIndex = lines.findIndex((line) => /^rules:\s*$/.test(line.trim()));
+  if (rulesIndex === -1) return [];
+  return lines.slice(rulesIndex + 1);
+}
+
+function parseRuleLine(line) {
+  const parsed = splitRuleParts(line.replace(/^- /, ""));
+  return ruleWithDefaults({ id: uid("rule"), ...parsed });
+}
+
+function importRulesLayoutFromText(text, fallbackRules = []) {
+  const sectionLines = extractRulesSectionLines(text);
+  const groups = [];
+  const rules = [];
+  let pendingComments = [];
+  let currentGroup = null;
+
+  if (sectionLines.length) {
+    sectionLines.forEach((rawLine) => {
+      const trimmed = rawLine.trim();
+      if (!trimmed) return;
+      if (/^#/.test(trimmed)) {
+        const comment = trimmed.replace(/^#+\s*/, "").trim();
+        if (comment) pendingComments.push(comment);
+        currentGroup = null;
+        return;
+      }
+      if (!trimmed.startsWith("- ")) return;
+
+      const rule = parseRuleLine(trimmed);
+      ensureStrategyExists(rule.target);
+
+      if (pendingComments.length) {
+        if (!currentGroup) {
+          currentGroup = ruleGroupWithDefaults({
+            id: uid("rule-group"),
+            name: pendingComments.join(" / ") || "规则分组",
+            collapsed: true,
+            emitComment: true,
+            commentLines: pendingComments.slice(),
+            ruleIds: []
+          });
+          groups.push(currentGroup);
+        }
+      } else {
+        const autoName = rule.target || "未分组";
+        if (!currentGroup || currentGroup.emitComment || currentGroup.name !== autoName) {
+          currentGroup = ruleGroupWithDefaults({
+            id: uid("rule-group"),
+            name: autoName,
+            collapsed: true,
+            emitComment: false,
+            ruleIds: []
+          });
+          groups.push(currentGroup);
+        }
+      }
+
+      rule.groupId = currentGroup.id;
+      rule.group = currentGroup.emitComment ? currentGroup.name : (rule.target || currentGroup.name || "未分组");
+      currentGroup.ruleIds.push(rule.id);
+      rules.push(rule);
+      pendingComments = [];
+    });
+  } else if (Array.isArray(fallbackRules) && fallbackRules.length) {
+    fallbackRules.forEach((entry) => {
+      const parsed = splitRuleParts(entry);
+      ensureStrategyExists(parsed.target);
+      rules.push(ruleWithDefaults({ id: uid("rule"), ...parsed }));
+    });
+    groups.push(...buildSequentialRuleGroups(rules));
+  }
+
+  state.rulesConfig.rules = rules;
+  state.rulesConfig.ruleGroups = groups;
+  ensureRuleGroupingState();
+}
+
+function snapshotState() {
+  return {
+    importedConfigPath: state.importedConfigPath,
+    lastSavedConfigPath: state.lastSavedConfigPath,
+    exportVersion: state.exportVersion,
+    rawInput: els.rawInput.value,
+    clashConfigInput: els.clashConfigInput.value,
+    targetFormat: els.targetFormat.value,
+    configExportName: els.configExportName.value,
+    state: {
+      assets: state.assets,
+      strategies: state.strategies,
+      clashBaseRaw: state.clashBaseRaw,
+      rulesConfig: {
+        ...state.rulesConfig,
+        ruleGroups: Array.isArray(state.rulesConfig.ruleGroups) ? state.rulesConfig.ruleGroups : []
+      }
+    }
+  };
+}
+
+function hydrateFromSnapshot(snapshot) {
+  if (!snapshot || !snapshot.state) return false;
+  state.importedConfigPath = snapshot.importedConfigPath || "";
+  state.lastSavedConfigPath = snapshot.lastSavedConfigPath || "";
+  state.exportVersion = Number.isInteger(snapshot.exportVersion) ? snapshot.exportVersion : 0;
+  state.assets = Array.isArray(snapshot.state.assets) ? snapshot.state.assets : [];
+  state.strategies = Array.isArray(snapshot.state.strategies) ? snapshot.state.strategies.map(strategyWithDefaults) : [];
+  state.clashBaseRaw = normalizeYamlDumpText(snapshot.state.clashBaseRaw || defaultClashBaseRaw);
+  state.rulesConfig = {
+    snifferRaw: normalizeYamlDumpText(snapshot.state.rulesConfig?.snifferRaw || defaultSnifferRaw),
+    providersRaw: snapshot.state.rulesConfig?.providersRaw || defaultProvidersRaw,
+    rules: Array.isArray(snapshot.state.rulesConfig?.rules) ? snapshot.state.rulesConfig.rules.map((rule) => ruleWithDefaults(rule)) : [],
+    ruleGroups: Array.isArray(snapshot.state.rulesConfig?.ruleGroups) ? snapshot.state.rulesConfig.ruleGroups.map((group) => ruleGroupWithDefaults(group)) : []
+  };
+  state.nodes = state.assets.flatMap((asset) => Array.isArray(asset.nodes) ? asset.nodes : []);
+  ensureRuleGroupingState();
+  els.rawInput.value = snapshot.rawInput || "";
+  els.clashConfigInput.value = snapshot.clashConfigInput || getDefaultConfigText();
+  els.targetFormat.value = snapshot.targetFormat || "clash";
+  els.configExportName.value = snapshot.configExportName || "";
+  return true;
+}
+
+function importTemplateDb(text) {
+  try {
+    const data = JSON.parse(text);
+    if (data.rulesConfig) {
+      state.rulesConfig.snifferRaw = data.rulesConfig.snifferRaw || state.rulesConfig.snifferRaw;
+      state.rulesConfig.providersRaw = data.rulesConfig.providersRaw || state.rulesConfig.providersRaw;
+      state.rulesConfig.rules = Array.isArray(data.rulesConfig.rules) ? data.rulesConfig.rules.map((rule) => ruleWithDefaults(rule)) : [];
+      state.rulesConfig.ruleGroups = Array.isArray(data.rulesConfig.ruleGroups) ? data.rulesConfig.ruleGroups.map((group) => ruleGroupWithDefaults(group)) : [];
+      ensureRuleGroupingState();
+    }
+    if (Array.isArray(data.strategies)) {
+      state.strategies = data.strategies.map((strategy) => strategyWithDefaults({
+        id: uid("strategy"),
+        name: strategy.name,
+        type: strategy.type || "select",
+        members: Array.isArray(strategy.members) && strategy.members.length ? strategy.members : [{ kind: "constant", value: "DIRECT" }]
+      }));
+    }
+  } catch {
+    return;
+  }
+}
+
+function exportTemplateDb() {
+  ensureRuleGroupingState();
+  const ruleTargets = new Set(
+    state.rulesConfig.rules
+      .map((rule) => rule.target)
+      .filter((target) => target && !allowedConstants.includes(target))
+  );
+  const payload = {
+    rulesConfig: {
+      snifferRaw: state.rulesConfig.snifferRaw,
+      providersRaw: state.rulesConfig.providersRaw,
+      rules: state.rulesConfig.rules,
+      ruleGroups: state.rulesConfig.ruleGroups
+    },
+    strategies: state.strategies.map((strategy) => ({
+      name: strategy.name,
+      type: strategy.type,
+      members: [{ kind: "constant", value: "DIRECT" }]
+    })).filter((strategy) => ruleTargets.has(strategy.name))
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "proxy-template.db";
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function importRulesConfig(text) {
+  const lines = text.split(/\r?\n/);
+  let section = "";
+  const snifferLines = [];
+  const providerLines = [];
+
+  lines.forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (!line) return;
+    if (line === "sniffer:") {
+      section = "sniffer";
+      return;
+    }
+    if (line === "rule-providers:") {
+      section = "providers";
+      return;
+    }
+    if (line === "rules:") {
+      section = "rules";
+      return;
+    }
+
+    if (section === "sniffer") {
+      snifferLines.push(rawLine.replace(/^\s{2}/, ""));
+      return;
+    }
+
+    if (section === "providers") {
+      providerLines.push(rawLine.replace(/^\s{2}/, ""));
+    }
+  });
+
+  state.rulesConfig.snifferRaw = snifferLines.join("\n");
+  state.rulesConfig.providersRaw = providerLines.join("\n");
+  importRulesLayoutFromText(text);
+}
+
+function importClashConfig(text) {
+  const parsedConfig = safeYamlLoad(text);
+  if (parsedConfig && typeof parsedConfig === "object" && !Array.isArray(parsedConfig)) {
+    const baseConfig = { ...parsedConfig };
+    delete baseConfig.sniffer;
+    delete baseConfig["rule-providers"];
+    delete baseConfig.proxies;
+    delete baseConfig["proxy-groups"];
+    delete baseConfig.rules;
+
+    state.assets = [];
+    state.nodes = [];
+    state.strategies = [];
+    state.rulesConfig.rules = [];
+    state.rulesConfig.ruleGroups = [];
+    state.clashBaseRaw = dumpYaml(baseConfig) || state.clashBaseRaw;
+    state.rulesConfig.snifferRaw = dumpYaml(parsedConfig.sniffer) || "";
+    state.rulesConfig.providersRaw = dumpYaml(parsedConfig["rule-providers"]) || "";
+
+    if (Array.isArray(parsedConfig.proxies) && parsedConfig.proxies.length) {
+      const proxies = parsedConfig.proxies.map((proxy) => ({ ...proxy, raw: "" }));
+      state.assets = buildAssetsFromImportedProxies(proxies);
+      state.nodes = state.assets.flatMap((asset) => asset.nodes);
+      ensureUniqueNodeNamesAcrossAssets();
+    }
+
+    importProxyGroupsFromConfig(parsedConfig["proxy-groups"]);
+    importRulesLayoutFromText(text, parsedConfig.rules);
+    return;
+  }
+
+  const lines = text.split(/\r?\n/);
+  const snifferIndex = lines.findIndex((line) => /^sniffer:\s*$/.test(line.trim()));
+  const providersIndex = lines.findIndex((line) => /^rule-providers:\s*$/.test(line.trim()));
+  const proxiesIndex = lines.findIndex((line) => /^proxies:\s*$/.test(line.trim()));
+  const proxyGroupsIndex = lines.findIndex((line) => /^proxy-groups:\s*$/.test(line.trim()));
+  const rulesIndex = lines.findIndex((line) => /^rules:\s*$/.test(line.trim()));
+
+  const cutIndexes = [snifferIndex, providersIndex, proxiesIndex, proxyGroupsIndex, rulesIndex].filter((index) => index !== -1);
+  const firstCut = cutIndexes.length ? Math.min(...cutIndexes) : lines.length;
+
+  state.assets = [];
+  state.nodes = [];
+  state.strategies = [];
+  state.rulesConfig.rules = [];
+  state.rulesConfig.ruleGroups = [];
+  state.clashBaseRaw = lines.slice(0, firstCut).join("\n").trim() || state.clashBaseRaw;
+
+  if (snifferIndex !== -1) {
+    state.rulesConfig.snifferRaw = collectSection(
+      lines,
+      snifferIndex + 1,
+      [/^rule-providers:\s*$/, /^proxy-groups:\s*$/, /^rules:\s*$/]
+    ).map((line) => line.replace(/^\s{2}/, "")).join("\n").trim();
+  }
+
+  if (providersIndex !== -1) {
+    state.rulesConfig.providersRaw = collectSection(
+      lines,
+      providersIndex + 1,
+      [/^proxies:\s*$/, /^proxy-groups:\s*$/, /^rules:\s*$/]
+    ).map((line) => line.replace(/^\s{2}/, "")).join("\n").trim();
+  }
+
+  if (proxiesIndex !== -1) {
+    const proxyLines = collectSection(
+      lines,
+      proxiesIndex + 1,
+      [/^proxy-groups:\s*$/, /^rules:\s*$/]
+    ).filter((line) => line.trim().startsWith("- {"));
+    const proxies = proxyLines.map((line) => {
+      const parsed = parseInlineProxyMap(line.trim());
+      return {
+        ...parsed,
+        raw: line.trim().replace(/^- /, "")
+      };
+    });
+    if (proxies.length) {
+      state.assets = buildAssetsFromImportedProxies(proxies);
+      state.nodes = state.assets.flatMap((asset) => asset.nodes);
+    }
+  }
+
+  if (proxyGroupsIndex !== -1) {
+    importProxyGroups(lines.slice(proxyGroupsIndex + 1, rulesIndex === -1 ? lines.length : rulesIndex));
+  }
+
+  importRulesLayoutFromText(text);
+}
+
+function renderRuleList() {
+  ensureRuleGroupingState();
+  els.rulesEditor.innerHTML = "";
+  buildRuleGroups().forEach((group) => {
+    const card = document.createElement("section");
+    card.className = "rule-group";
+    card.classList.toggle("collapsed", group.collapsed !== false);
+
+    const head = document.createElement("div");
+    head.className = "rule-group-head";
+
+    const meta = document.createElement("div");
+    meta.className = "rule-group-meta";
+
+    const groupInput = document.createElement("input");
+    groupInput.value = group.name;
+    groupInput.placeholder = "分组名称";
+    groupInput.addEventListener("change", (event) => {
+      const nextName = event.target.value.trim();
+      const currentGroup = state.rulesConfig.ruleGroups.find((item) => item.id === group.id);
+      if (!currentGroup) return;
+      const currentRules = getRulesForGroup(currentGroup);
+      const commonTarget = currentRules.length && currentRules.every((rule) => rule.target === currentRules[0].target)
+        ? currentRules[0].target
+        : currentRules[0]?.target || "未分组";
+      currentGroup.emitComment = Boolean(nextName && nextName !== commonTarget);
+      currentGroup.name = currentGroup.emitComment ? nextName : commonTarget;
+      currentGroup.commentLines = currentGroup.emitComment ? [currentGroup.name] : [];
+      syncRulesArrayFromGroups();
+      renderRules();
+      renderOutput();
+    });
+
+    const targetSummary = document.createElement("div");
+    targetSummary.className = "rule-group-targets";
+    targetSummary.textContent = `目标策略：${group.targets.join(" / ") || "未设置"} · ${group.rules.length} 条`;
+
+    meta.append(groupInput, targetSummary);
+
+    const actions = document.createElement("div");
+    actions.className = "rule-group-actions";
+
+    const topBtn = document.createElement("button");
+    topBtn.type = "button";
+    topBtn.className = "ghost";
+    topBtn.textContent = "置顶";
+    topBtn.disabled = findRuleGroupIndex(group.id) <= 0;
+    topBtn.addEventListener("click", () => moveRuleGroupToIndex(group.id, 0));
+
+    const upBtn = document.createElement("button");
+    upBtn.type = "button";
+    upBtn.className = "ghost";
+    upBtn.textContent = "上移";
+    upBtn.disabled = findRuleGroupIndex(group.id) <= 0;
+    upBtn.addEventListener("click", () => moveRuleGroupToIndex(group.id, findRuleGroupIndex(group.id) - 1));
+
+    const downBtn = document.createElement("button");
+    downBtn.type = "button";
+    downBtn.className = "ghost";
+    downBtn.textContent = "下移";
+    downBtn.disabled = findRuleGroupIndex(group.id) >= state.rulesConfig.ruleGroups.length - 1;
+    downBtn.addEventListener("click", () => moveRuleGroupToIndex(group.id, findRuleGroupIndex(group.id) + 1));
+
+    const toggleBtn = document.createElement("button");
+    toggleBtn.type = "button";
+    toggleBtn.className = "ghost";
+    toggleBtn.textContent = group.collapsed !== false ? "展开" : "折叠";
+    toggleBtn.addEventListener("click", () => {
+      const currentGroup = state.rulesConfig.ruleGroups.find((item) => item.id === group.id);
+      if (!currentGroup) return;
+      currentGroup.collapsed = !(currentGroup.collapsed !== false);
+      renderRules();
+    });
+
+    const addRuleBtn = document.createElement("button");
+    addRuleBtn.type = "button";
+    addRuleBtn.className = "ghost";
+    addRuleBtn.textContent = "新增规则";
+    addRuleBtn.addEventListener("click", () => {
+      const currentGroup = state.rulesConfig.ruleGroups.find((item) => item.id === group.id);
+      if (!currentGroup) return;
+      const rule = ruleWithDefaults({
+        id: uid("rule"),
+        target: group.rules[0]?.target || "节点选择",
+        group: currentGroup.emitComment ? currentGroup.name : (group.rules[0]?.target || "节点选择")
+      });
+      rule.groupId = currentGroup.id;
+      currentGroup.ruleIds.push(rule.id);
+      state.rulesConfig.rules.push(rule);
+      ensureStrategyExists(rule.target);
+      syncRulesArrayFromGroups();
+      renderRules();
+      renderOutput();
+    });
+
+    actions.append(topBtn, upBtn, downBtn, toggleBtn, addRuleBtn);
+    head.append(meta, actions);
+
+    const body = document.createElement("div");
+    body.className = "rule-group-body";
+
+    group.rules.forEach((rule) => {
+      const row = els.ruleTemplate.content.firstElementChild.cloneNode(true);
+      row.querySelector(".rule-type").value = rule.type;
+      row.querySelector(".rule-value").value = rule.value;
+      row.querySelector(".rule-target").value = rule.target;
+      row.querySelector(".rule-type").addEventListener("change", (event) => {
+        rule.type = event.target.value;
+        renderOutput();
+      });
+      row.querySelector(".rule-value").addEventListener("input", (event) => {
+        rule.value = event.target.value;
+        renderOutput();
+      });
+      row.querySelector(".rule-target").addEventListener("change", (event) => {
+        const nextTarget = event.target.value.trim();
+        const currentGroup = state.rulesConfig.ruleGroups.find((item) => item.id === rule.groupId);
+        if (!currentGroup) return;
+        rule.target = nextTarget;
+        ensureStrategyExists(rule.target);
+        if (!currentGroup.emitComment) {
+          const currentIndex = findRuleGroupIndex(currentGroup.id);
+          currentGroup.ruleIds = currentGroup.ruleIds.filter((ruleId) => ruleId !== rule.id);
+          removeEmptyRuleGroups();
+          const nextGroup = ruleGroupWithDefaults({
+            id: uid("rule-group"),
+            name: rule.target || "未分组",
+            collapsed: false,
+            emitComment: false,
+            commentLines: [],
+            ruleIds: [rule.id]
+          });
+          rule.groupId = nextGroup.id;
+          rule.group = rule.target || "未分组";
+          state.rulesConfig.ruleGroups.splice(Math.max(0, currentIndex), 0, nextGroup);
+        } else {
+          rule.group = currentGroup.name;
+        }
+        syncRulesArrayFromGroups();
+        renderRules();
+        renderOutput();
+      });
+      row.querySelector(".rule-delete").addEventListener("click", () => {
+        const currentGroup = state.rulesConfig.ruleGroups.find((item) => item.id === rule.groupId);
+        if (currentGroup) {
+          currentGroup.ruleIds = currentGroup.ruleIds.filter((ruleId) => ruleId !== rule.id);
+        }
+        state.rulesConfig.rules = state.rulesConfig.rules.filter((item) => item.id !== rule.id);
+        removeEmptyRuleGroups();
+        syncRulesArrayFromGroups();
+        renderRules();
+        renderOutput();
+      });
+      body.appendChild(row);
+    });
+
+    card.append(head, body);
+    els.rulesEditor.appendChild(card);
+  });
+}
+
+function renderRules() {
+  renderSnifferSummary();
+  renderSnifferEditor();
+  renderProvidersSummary();
+  renderProvidersEditor();
+  renderRuleList();
+}
+
+function appendFormattedRules(lines) {
+  buildRuleGroups().forEach((group) => {
+    if (group.emitComment && group.name) {
+      const comments = Array.isArray(group.commentLines) && group.commentLines.length ? group.commentLines : [group.name];
+      comments.forEach((comment) => {
+        lines.push(`  #${comment}`);
+      });
+    }
+    group.rules.forEach((rule) => {
+      lines.push(`  - ${formatRuleLine(rule)}`);
+    });
+  });
+}
+
 async function boot() {
   bindEvents();
+
+  if (els.addRuleBtn) {
+    const addRuleBtn = els.addRuleBtn.cloneNode(true);
+    els.addRuleBtn.replaceWith(addRuleBtn);
+    els.addRuleBtn = addRuleBtn;
+    els.addRuleBtn.addEventListener("click", () => {
+      createRuleGroupAtTop({ name: "节点选择", emitComment: false, target: "节点选择" });
+    });
+  }
+
+  if (els.addRuleGroupBtn) {
+    const addRuleGroupBtn = els.addRuleGroupBtn.cloneNode(true);
+    els.addRuleGroupBtn.replaceWith(addRuleGroupBtn);
+    els.addRuleGroupBtn = addRuleGroupBtn;
+    els.addRuleGroupBtn.addEventListener("click", () => {
+      createRuleGroupAtTop({ name: createRuleGroupName(), emitComment: true, target: "节点选择" });
+    });
+  }
+
+  if (els.appVersionLabel) {
+    const version = window.desktopAPI?.getAppVersion
+      ? await window.desktopAPI.getAppVersion().catch(() => "")
+      : "";
+    els.appVersionLabel.textContent = version ? `Version ${version}` : "Version";
+  }
+
+  const restored = window.desktopAPI?.loadSession
+    ? await window.desktopAPI.loadSession().catch(() => null)
+    : null;
+
+  if (hydrateFromSnapshot(restored)) {
+    render();
+    return;
+  }
+
+  els.rawInput.value = sampleRawInput;
+  els.clashConfigInput.value = getDefaultConfigText();
+  seedDemoData();
+  render();
+}
+
+async function bootLegacy() {
+  bindEvents();
+  if (els.appVersionLabel) {
+    const version = window.desktopAPI?.getAppVersion
+      ? await window.desktopAPI.getAppVersion().catch(() => "")
+      : "";
+    els.appVersionLabel.textContent = version ? `Version ${version}` : "Version";
+  }
 
   const restored = window.desktopAPI?.loadSession
     ? await window.desktopAPI.loadSession().catch(() => null)

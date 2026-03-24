@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Proxy Asset Composer Demo</title>
+  <title>Proxy Asset Composer</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div class="app-shell">
     <aside class="sidebar">
       <div class="brand">
-        <p class="eyebrow">HTML DEMO</p>
+        <p class="eyebrow" id="appVersionLabel">Version</p>
         <h1>Proxy Asset Composer</h1>
         <p class="lead">把订阅转换升级成“配置、资产库、规则、可复用分流策略”的统一工作台。</p>
       </div>
@@ -56,6 +56,7 @@
             <p class="eyebrow">WORKSPACE</p>
             <h2>工作台</h2>
           </div>
+          <div id="validationPanel" class="validation-banner"></div>
           <div class="action-row">
             <button id="openConfigBtn" class="ghost gear-btn">⚙ 配置</button>
           </div>
@@ -69,7 +70,6 @@
             <h2>1. 分流策略编排</h2>
           </div>
           <div class="action-row">
-            <button id="loadTemplateBtn" class="ghost">载入模板</button>
             <button id="addStrategyBtn" class="primary">新增策略层</button>
           </div>
         </div>
@@ -98,7 +98,6 @@
           <span>策略引用在导出时保留策略名，资产库引用展开为节点。</span>
           <span id="resolveInfo"></span>
         </div>
-        <div id="validationPanel" class="validation-panel"></div>
         <pre id="outputPreview"></pre>
       </section>
     </main>
@@ -124,7 +123,7 @@
         <div class="action-row">
           <input id="templateFileInput" type="file" accept=".db,.json,.txt" hidden>
           <button id="importTemplateBtn" class="ghost">导入模板</button>
-          <button id="exportTemplateBtn" class="ghost">导出模板 DB</button>
+          <button id="exportTemplateBtn" class="ghost">导出模板</button>
         </div>
       </div>
 
@@ -193,7 +192,10 @@
           <section class="rules-panel">
             <div class="panel-head">
               <h3>Rules</h3>
-              <button id="addRuleBtn" class="ghost">新增规则</button>
+              <div class="action-row">
+                <button id="addRuleGroupBtn" class="ghost">新增分组</button>
+                <button id="addRuleBtn" class="ghost">新增规则</button>
+              </div>
             </div>
             <div id="rulesEditor" class="stack-list"></div>
           </section>
@@ -314,23 +316,31 @@
 
   <template id="strategyTemplate">
     <article class="strategy-card">
-      <div class="strategy-top">
-        <input class="strategy-name" />
-        <select class="strategy-type">
-          <option value="select">手动选择</option>
-          <option value="url-test">自动测速</option>
-          <option value="fallback">故障转移</option>
-          <option value="load-balance">负载均衡</option>
-        </select>
+      <div class="strategy-head">
+        <div class="strategy-top">
+          <input class="strategy-name" />
+          <select class="strategy-type">
+            <option value="select">手动选择</option>
+            <option value="url-test">自动测速</option>
+            <option value="fallback">故障转移</option>
+            <option value="load-balance">负载均衡</option>
+          </select>
+        </div>
+        <div class="strategy-head-actions">
+          <button class="ghost strategy-move-top" type="button">置顶</button>
+          <button class="ghost strategy-move-up" type="button">上移</button>
+          <button class="ghost strategy-move-down" type="button">下移</button>
+          <button class="ghost strategy-toggle" type="button">展开</button>
+          <button class="danger strategy-delete" type="button">删除</button>
+        </div>
       </div>
-      <div class="strategy-help"></div>
-      <div class="strategy-member-list"></div>
-      <div class="strategy-member-actions">
-        <button class="ghost strategy-add-member">新增选项卡</button>
-      </div>
-      <div class="strategy-foot">
-        <span class="strategy-summary"></span>
-        <button class="danger strategy-delete">删除</button>
+      <div class="strategy-summary"></div>
+      <div class="strategy-body">
+        <div class="strategy-help"></div>
+        <div class="strategy-member-list"></div>
+        <div class="strategy-member-actions">
+          <button class="ghost strategy-add-member" type="button">新增选项卡</button>
+        </div>
       </div>
     </article>
   </template>

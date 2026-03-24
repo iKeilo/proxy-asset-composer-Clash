@@ -60,8 +60,14 @@ async function openConfigFile() {
   };
 }
 
-function saveConfigFile(payload) {
-  const { filePath, content } = payload;
+async function saveConfigFile(payload) {
+  const { defaultPath, content } = payload;
+  const { canceled, filePath } = await dialog.showSaveDialog({
+    title: "导出 Clash 配置",
+    defaultPath,
+    filters: [{ name: "Config", extensions: ["yaml", "yml", "txt"] }]
+  });
+  if (canceled || !filePath) return null;
   fs.writeFileSync(filePath, content, "utf8");
   return { filePath };
 }
@@ -84,6 +90,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  ipcMain.handle("app:version", () => app.getVersion());
   ipcMain.handle("session:load", () => loadSession());
   ipcMain.handle("session:save", (_event, payload) => saveSession(payload));
   ipcMain.handle("config:open", () => openConfigFile());
