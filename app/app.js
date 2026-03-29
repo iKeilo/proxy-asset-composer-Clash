@@ -75,6 +75,13 @@ const defaultProvidersRaw = [
   "  interval: 86400"
 ].join("\n");
 let persistTimer = null;
+let outputRenderTimer = null;
+const yamlParseCache = new Map();
+const yamlParseError = Symbol("yamlParseError");
+const ruleEditorDrafts = {
+  groups: new Map(),
+  rules: new Map()
+};
 const flagRegionMap = [
   ["🇺🇲", "美国资产库"],
   ["🇺🇸", "美国资产库"],
@@ -163,6 +170,7 @@ const els = {
   ruleCount: document.querySelector("#ruleCount"),
   resolveInfo: document.querySelector("#resolveInfo"),
   validationPanel: document.querySelector("#validationPanel"),
+  saveWorkspaceBtn: document.querySelector("#saveWorkspaceBtn"),
   assetTemplate: document.querySelector("#assetTemplate"),
   assetNodeTemplate: document.querySelector("#assetNodeTemplate"),
   strategyTemplate: document.querySelector("#strategyTemplate"),
@@ -171,11 +179,33 @@ const els = {
   ruleTemplate: document.querySelector("#ruleTemplate")
 };
 
+function cloneYamlValue(value) {
+  if (value == null || typeof value !== "object") return value;
+  if (typeof structuredClone === "function") return structuredClone(value);
+  return JSON.parse(JSON.stringify(value));
+}
+
+function rememberYamlParse(key, value) {
+  if (yamlParseCache.size >= 24) {
+    const oldestKey = yamlParseCache.keys().next().value;
+    if (oldestKey !== undefined) yamlParseCache.delete(oldestKey);
+  }
+  yamlParseCache.set(key, value);
+}
+
 function safeYamlLoad(text) {
-  if (!text || !String(text).trim()) return null;
+  const raw = String(text ?? "");
+  if (!raw.trim()) return null;
+  if (yamlParseCache.has(raw)) {
+    const cached = yamlParseCache.get(raw);
+    return cached === yamlParseError ? null : cloneYamlValue(cached);
+  }
   try {
-    return window.jsyaml.load(text);
+    const parsed = window.jsyaml.load(raw);
+    rememberYamlParse(raw, parsed);
+    return cloneYamlValue(parsed);
   } catch {
+    rememberYamlParse(raw, yamlParseError);
     return null;
   }
 }
@@ -1269,6 +1299,7 @@ function nextVersionName() {
 }
 
 async function exportCurrentConfig() {
+  commitRuleEditorDrafts();
   const result = buildOutputModel();
   const content = formatClash(result);
   const rawName = els.configExportName.value.trim();
@@ -1399,6 +1430,7 @@ function bindEvents() {
   }
   els.addProviderBtn.addEventListener("click", () => {
     state.rulesConfig.providersRaw = `${state.rulesConfig.providersRaw}\n\nNewProvider:\n  type: http\n  behavior: classical\n  path: ./ruleset/NewProvider.yaml\n  url: ""\n  interval: 86400`.trim();
+    renderRulePanels();
     renderRules();
     renderOutput();
   });
@@ -1426,7 +1458,11 @@ function renderAssets() {
     card.querySelector(".asset-name").value = asset.name;
     card.querySelector(".asset-kind").value = asset.kind;
     card.querySelector(".asset-summary").textContent = `${asset.nodes.length} 个节点，可修改名称、地址、端口和备注，协议只读`;
-    card.querySelector(".asset-name").addEventListener("input", (event) => { asset.name = event.target.value.trim() || "未命名资产库"; render(); });
+    card.querySelector(".asset-name").addEventListener("input", (event) => {
+      asset.name = event.target.value.trim() || "未命名资产库";
+      renderStats();
+      schedulePersist();
+    });
     card.querySelector(".asset-kind").addEventListener("change", (event) => { asset.kind = event.target.value; renderOutput(); });
     card.querySelector(".asset-add-node").addEventListener("click", () => openNodeModal(asset.id));
     card.querySelector(".asset-delete").addEventListener("click", () => { state.assets = state.assets.filter((item) => item.id !== asset.id); render(); });
@@ -1540,7 +1576,8 @@ function renderStrategies() {
     });
     card.querySelector(".strategy-name").addEventListener("input", (event) => {
       strategy.name = event.target.value.trim() || "未命名策略层";
-      render();
+      renderStats();
+      renderOutput();
     });
     card.querySelector(".strategy-type").addEventListener("change", (event) => {
       strategy.type = event.target.value;
@@ -1649,7 +1686,8 @@ function renderStrategies() {
     });
     card.querySelector(".strategy-name").addEventListener("input", (event) => {
       strategy.name = event.target.value.trim() || "未命名策略层";
-      render();
+      renderStats();
+      renderOutput();
     });
     card.querySelector(".strategy-type").addEventListener("change", (event) => {
       strategy.type = event.target.value;
@@ -1696,49 +1734,86 @@ function renderStrategies() {
 }
 
 function renderSnifferSummary() {
-  els.snifferSummary.innerHTML = "";
-  const card = document.createElement("div");
-  card.className = "summary-card";
-  card.innerHTML = `<pre>${escapeHtml(state.rulesConfig.snifferRaw || "-")}</pre>`;
-  els.snifferSummary.appendChild(card);
+  let card = els.snifferSummary.querySelector(".summary-card");
+  let pre = card?.querySelector("pre");
+  if (!card || !pre) {
+    els.snifferSummary.innerHTML = "";
+    card = document.createElement("div");
+    card.className = "summary-card";
+    pre = document.createElement("pre");
+    card.appendChild(pre);
+    els.snifferSummary.appendChild(card);
+  }
+  const nextText = state.rulesConfig.snifferRaw || "-";
+  if (pre.textContent !== nextText) {
+    pre.textContent = nextText;
+  }
 }
 
 function renderSnifferEditor() {
-  els.snifferEditor.innerHTML = "";
-  const area = document.createElement("textarea");
-  area.value = state.rulesConfig.snifferRaw;
-  area.addEventListener("input", (event) => {
-    state.rulesConfig.snifferRaw = event.target.value;
-    renderSnifferSummary();
-    renderOutput();
-  });
-  const card = document.createElement("div");
-  card.className = "summary-card";
-  card.appendChild(area);
-  els.snifferEditor.appendChild(card);
+  let card = els.snifferEditor.querySelector(".summary-card");
+  let area = card?.querySelector("textarea");
+  if (!card || !area) {
+    els.snifferEditor.innerHTML = "";
+    area = document.createElement("textarea");
+    area.addEventListener("input", (event) => {
+      state.rulesConfig.snifferRaw = event.target.value;
+      renderSnifferSummary();
+      renderOutput();
+    });
+    card = document.createElement("div");
+    card.className = "summary-card";
+    card.appendChild(area);
+    els.snifferEditor.appendChild(card);
+  }
+  if (area.value !== state.rulesConfig.snifferRaw) {
+    area.value = state.rulesConfig.snifferRaw;
+  }
 }
 
 function renderProvidersSummary() {
-  els.providersSummary.innerHTML = "";
-  const card = document.createElement("div");
-  card.className = "summary-card";
-  card.innerHTML = `<pre>${escapeHtml(state.rulesConfig.providersRaw || "-")}</pre>`;
-  els.providersSummary.appendChild(card);
+  let card = els.providersSummary.querySelector(".summary-card");
+  let pre = card?.querySelector("pre");
+  if (!card || !pre) {
+    els.providersSummary.innerHTML = "";
+    card = document.createElement("div");
+    card.className = "summary-card";
+    pre = document.createElement("pre");
+    card.appendChild(pre);
+    els.providersSummary.appendChild(card);
+  }
+  const nextText = state.rulesConfig.providersRaw || "-";
+  if (pre.textContent !== nextText) {
+    pre.textContent = nextText;
+  }
 }
 
 function renderProvidersEditor() {
-  els.providersEditor.innerHTML = "";
-  const area = document.createElement("textarea");
-  area.value = state.rulesConfig.providersRaw;
-  area.addEventListener("input", (event) => {
-    state.rulesConfig.providersRaw = event.target.value;
-    renderProvidersSummary();
-    renderOutput();
-  });
-  const card = document.createElement("div");
-  card.className = "summary-card";
-  card.appendChild(area);
-  els.providersEditor.appendChild(card);
+  let card = els.providersEditor.querySelector(".summary-card");
+  let area = card?.querySelector("textarea");
+  if (!card || !area) {
+    els.providersEditor.innerHTML = "";
+    area = document.createElement("textarea");
+    area.addEventListener("input", (event) => {
+      state.rulesConfig.providersRaw = event.target.value;
+      renderProvidersSummary();
+      renderOutput();
+    });
+    card = document.createElement("div");
+    card.className = "summary-card";
+    card.appendChild(area);
+    els.providersEditor.appendChild(card);
+  }
+  if (area.value !== state.rulesConfig.providersRaw) {
+    area.value = state.rulesConfig.providersRaw;
+  }
+}
+
+function renderRulePanels() {
+  renderSnifferSummary();
+  renderSnifferEditor();
+  renderProvidersSummary();
+  renderProvidersEditor();
 }
 
 function renderRuleList() {
@@ -1782,9 +1857,20 @@ function renderRuleList() {
     meta.className = "rule-group-meta";
 
     const groupInput = document.createElement("input");
-    groupInput.value = group.name;
+    groupInput.className = "rule-group-name";
+    groupInput.value = getRuleGroupDraft(group.id)?.name ?? group.name;
     groupInput.placeholder = "分组名称";
+    groupInput.addEventListener("input", (event) => {
+      setRuleGroupDraft(group.id, { name: event.target.value.trim() });
+    });
+    groupInput.addEventListener("input", (event) => {
+      setRuleGroupDraft(group.id, { name: event.target.value.trim() });
+    });
     groupInput.addEventListener("change", (event) => {
+      setRuleGroupDraft(group.id, { name: event.target.value.trim() });
+      return;
+      setRuleGroupDraft(group.id, { name: event.target.value.trim() });
+      return;
       const nextName = event.target.value.trim();
       const normalizedName = nextName || group.rules[0]?.target || "未分组";
       group.rules.forEach((rule) => {
@@ -1824,9 +1910,31 @@ function renderRuleList() {
 
     group.rules.forEach((rule) => {
       const row = els.ruleTemplate.content.firstElementChild.cloneNode(true);
-      row.querySelector(".rule-type").value = rule.type;
-      row.querySelector(".rule-value").value = rule.value;
-      row.querySelector(".rule-target").value = rule.target;
+      const draft = getRuleDraft(rule.id);
+      const typeInput = row.querySelector(".rule-type");
+      const valueInput = row.querySelector(".rule-value");
+      const targetInput = row.querySelector(".rule-target");
+      row.dataset.ruleId = rule.id;
+      typeInput.value = draft?.type ?? rule.type;
+      valueInput.value = draft?.value ?? rule.value;
+      targetInput.value = draft?.target ?? rule.target;
+      typeInput.addEventListener("change", (event) => {
+        setRuleDraft(rule.id, { type: event.target.value });
+      });
+      row.querySelector(".rule-type").addEventListener("change", (event) => {
+        setRuleDraft(rule.id, { type: event.target.value });
+        return;
+      });
+      valueInput.addEventListener("input", (event) => {
+        setRuleDraft(rule.id, { value: event.target.value });
+      });
+      row.querySelector(".rule-value").addEventListener("input", (event) => {
+        setRuleDraft(rule.id, { value: event.target.value });
+        return;
+      });
+      targetInput.addEventListener("input", (event) => {
+        setRuleDraft(rule.id, { target: event.target.value.trim() });
+      });
       row.querySelector(".rule-type").addEventListener("change", (event) => {
         rule.type = event.target.value;
         renderOutput();
@@ -1859,10 +1967,6 @@ function renderRuleList() {
 }
 
 function renderRules() {
-  renderSnifferSummary();
-  renderSnifferEditor();
-  renderProvidersSummary();
-  renderProvidersEditor();
   renderRuleList();
 }
 
@@ -2076,7 +2180,7 @@ function formatOutput(result) {
   return els.targetFormat.value === "surge" ? formatSurge(result) : formatClash(result);
 }
 
-function renderOutput() {
+function renderOutputNow() {
   ensureUniqueNodeNamesAcrossAssets();
   const result = buildOutputModel();
   els.resolveInfo.textContent = `已解析 ${result.totalResolvedNodes} 个叶子节点，${result.reusedStrategies} 个策略引用，${state.rulesConfig.rules.length} 条规则`;
@@ -2085,12 +2189,26 @@ function renderOutput() {
   schedulePersist();
 }
 
+function renderOutput(options = null) {
+  const immediate = Boolean(options && typeof options === "object" && options.immediate);
+  clearTimeout(outputRenderTimer);
+  if (immediate) {
+    renderOutputNow();
+    return;
+  }
+  outputRenderTimer = setTimeout(() => {
+    outputRenderTimer = null;
+    renderOutputNow();
+  }, 80);
+}
+
 function render() {
   renderAssets();
   renderStrategies();
+  renderRulePanels();
   renderRules();
   renderStats();
-  renderOutput();
+  renderOutput({ immediate: true });
 }
 
 function yamlString(value) {
@@ -2268,6 +2386,147 @@ function moveRuleGroupToIndex(groupId, targetIndex) {
 
 function removeEmptyRuleGroups() {
   state.rulesConfig.ruleGroups = state.rulesConfig.ruleGroups.filter((group) => group.ruleIds.length);
+}
+
+function setRuleGroupDraft(groupId, patch = {}) {
+  if (!groupId) return;
+  const existing = ruleEditorDrafts.groups.get(groupId) || {};
+  ruleEditorDrafts.groups.set(groupId, { ...existing, ...patch });
+}
+
+function getRuleGroupDraft(groupId) {
+  return groupId ? (ruleEditorDrafts.groups.get(groupId) || null) : null;
+}
+
+function clearRuleGroupDraft(groupId) {
+  if (!groupId) return;
+  ruleEditorDrafts.groups.delete(groupId);
+}
+
+function setRuleDraft(ruleId, patch = {}) {
+  if (!ruleId) return;
+  const existing = ruleEditorDrafts.rules.get(ruleId) || {};
+  ruleEditorDrafts.rules.set(ruleId, { ...existing, ...patch });
+}
+
+function getRuleDraft(ruleId) {
+  return ruleId ? (ruleEditorDrafts.rules.get(ruleId) || null) : null;
+}
+
+function clearRuleDraft(ruleId) {
+  if (!ruleId) return;
+  ruleEditorDrafts.rules.delete(ruleId);
+}
+
+function clearRuleEditorDrafts() {
+  ruleEditorDrafts.groups.clear();
+  ruleEditorDrafts.rules.clear();
+}
+
+function syncRuleEditorDraftsFromDom() {
+  if (!els.rulesEditor) return;
+  els.rulesEditor.querySelectorAll(".rule-group").forEach((groupCard) => {
+    const groupId = groupCard.dataset.groupId;
+    const groupNameInput = groupCard.querySelector(".rule-group-name");
+    if (groupId && groupNameInput) {
+      setRuleGroupDraft(groupId, { name: groupNameInput.value.trim() });
+    }
+    groupCard.querySelectorAll(".rule-row").forEach((row) => {
+      const ruleId = row.dataset.ruleId;
+      if (!ruleId) return;
+      setRuleDraft(ruleId, {
+        type: row.querySelector(".rule-type")?.value || "MATCH",
+        value: row.querySelector(".rule-value")?.value || "",
+        target: row.querySelector(".rule-target")?.value.trim() || "节点选择"
+      });
+    });
+  });
+}
+
+function commitRuleEditorDrafts() {
+  ensureRuleGroupingState();
+  syncRuleEditorDraftsFromDom();
+  const groupCards = Array.from(els.rulesEditor?.querySelectorAll(".rule-group") || []);
+  if (!groupCards.length) {
+    clearRuleEditorDrafts();
+    return;
+  }
+
+  const groupMap = new Map(state.rulesConfig.ruleGroups.map((group) => [group.id, ruleGroupWithDefaults(group)]));
+  const ruleMap = new Map(state.rulesConfig.rules.map((rule) => [rule.id, ruleWithDefaults(rule)]));
+  const nextGroups = [];
+  const nextRules = [];
+
+  groupCards.forEach((groupCard) => {
+    const sourceGroup = ruleGroupWithDefaults(groupMap.get(groupCard.dataset.groupId) || { id: groupCard.dataset.groupId || uid("rule-group") });
+    const rows = Array.from(groupCard.querySelectorAll(".rule-row"));
+    if (!rows.length) return;
+
+    const draftedRules = rows.map((row) => {
+      const ruleId = row.dataset.ruleId || uid("rule");
+      const baseRule = ruleWithDefaults(ruleMap.get(ruleId) || { id: ruleId });
+      return ruleWithDefaults({
+        ...baseRule,
+        id: ruleId,
+        type: row.querySelector(".rule-type")?.value || baseRule.type,
+        value: row.querySelector(".rule-value")?.value || "",
+        target: row.querySelector(".rule-target")?.value.trim() || "节点选择"
+      });
+    });
+
+    const enteredGroupName = groupCard.querySelector(".rule-group-name")?.value.trim() || "";
+    const commonTarget = draftedRules.length && draftedRules.every((rule) => rule.target === draftedRules[0].target)
+      ? draftedRules[0].target
+      : draftedRules[0]?.target || sourceGroup.name || "未分组";
+    const emitComment = Boolean(enteredGroupName && enteredGroupName !== commonTarget);
+
+    if (emitComment) {
+      const nextGroup = ruleGroupWithDefaults({
+        id: sourceGroup.id,
+        name: enteredGroupName,
+        collapsed: sourceGroup.collapsed,
+        emitComment: true,
+        commentLines: [enteredGroupName],
+        ruleIds: []
+      });
+      draftedRules.forEach((rule) => {
+        ensureStrategyExists(rule.target);
+        rule.groupId = nextGroup.id;
+        rule.group = nextGroup.name;
+        nextGroup.ruleIds.push(rule.id);
+        nextRules.push(rule);
+      });
+      nextGroups.push(nextGroup);
+      return;
+    }
+
+    let currentGroup = null;
+    draftedRules.forEach((rule, index) => {
+      ensureStrategyExists(rule.target);
+      const autoName = rule.target || "未分组";
+      if (!currentGroup || currentGroup.name !== autoName) {
+        currentGroup = ruleGroupWithDefaults({
+          id: !nextGroups.some((group) => group.id === sourceGroup.id) && index === 0 ? sourceGroup.id : uid("rule-group"),
+          name: autoName,
+          collapsed: sourceGroup.collapsed,
+          emitComment: false,
+          commentLines: [],
+          ruleIds: []
+        });
+        nextGroups.push(currentGroup);
+      }
+      rule.groupId = currentGroup.id;
+      rule.group = autoName;
+      currentGroup.ruleIds.push(rule.id);
+      nextRules.push(rule);
+    });
+  });
+
+  state.rulesConfig.ruleGroups = nextGroups;
+  state.rulesConfig.rules = nextRules;
+  removeEmptyRuleGroups();
+  syncRulesArrayFromGroups();
+  clearRuleEditorDrafts();
 }
 
 function createRuleGroupAtTop({ name, emitComment, target = "节点选择" }) {
@@ -2606,6 +2865,7 @@ function renderRuleList() {
   buildRuleGroups().forEach((group) => {
     const card = document.createElement("section");
     card.className = "rule-group";
+    card.dataset.groupId = group.id;
     card.classList.toggle("collapsed", group.collapsed !== false);
 
     const head = document.createElement("div");
@@ -2615,7 +2875,8 @@ function renderRuleList() {
     meta.className = "rule-group-meta";
 
     const groupInput = document.createElement("input");
-    groupInput.value = group.name;
+    groupInput.className = "rule-group-name";
+    groupInput.value = getRuleGroupDraft(group.id)?.name ?? group.name;
     groupInput.placeholder = "分组名称";
     groupInput.addEventListener("change", (event) => {
       const nextName = event.target.value.trim();
@@ -2689,10 +2950,9 @@ function renderRuleList() {
       rule.groupId = currentGroup.id;
       currentGroup.ruleIds.push(rule.id);
       state.rulesConfig.rules.push(rule);
-      ensureStrategyExists(rule.target);
       syncRulesArrayFromGroups();
       renderRules();
-      renderOutput();
+      renderStats();
     });
 
     actions.append(topBtn, upBtn, downBtn, toggleBtn, addRuleBtn);
@@ -2703,18 +2963,38 @@ function renderRuleList() {
 
     group.rules.forEach((rule) => {
       const row = els.ruleTemplate.content.firstElementChild.cloneNode(true);
-      row.querySelector(".rule-type").value = rule.type;
-      row.querySelector(".rule-value").value = rule.value;
-      row.querySelector(".rule-target").value = rule.target;
+      const draft = getRuleDraft(rule.id);
+      const typeInput = row.querySelector(".rule-type");
+      const valueInput = row.querySelector(".rule-value");
+      const targetInput = row.querySelector(".rule-target");
+      row.dataset.ruleId = rule.id;
+      typeInput.value = draft?.type ?? rule.type;
+      valueInput.value = draft?.value ?? rule.value;
+      targetInput.value = draft?.target ?? rule.target;
+      typeInput.addEventListener("change", (event) => {
+        setRuleDraft(rule.id, { type: event.target.value });
+      });
       row.querySelector(".rule-type").addEventListener("change", (event) => {
+        setRuleDraft(rule.id, { type: event.target.value });
+        return;
         rule.type = event.target.value;
         renderOutput();
       });
+      valueInput.addEventListener("input", (event) => {
+        setRuleDraft(rule.id, { value: event.target.value });
+      });
       row.querySelector(".rule-value").addEventListener("input", (event) => {
+        setRuleDraft(rule.id, { value: event.target.value });
+        return;
         rule.value = event.target.value;
         renderOutput();
       });
+      targetInput.addEventListener("input", (event) => {
+        setRuleDraft(rule.id, { target: event.target.value.trim() });
+      });
       row.querySelector(".rule-target").addEventListener("change", (event) => {
+        setRuleDraft(rule.id, { target: event.target.value.trim() });
+        return;
         const nextTarget = event.target.value.trim();
         const currentGroup = state.rulesConfig.ruleGroups.find((item) => item.id === rule.groupId);
         if (!currentGroup) return;
@@ -2748,10 +3028,11 @@ function renderRuleList() {
           currentGroup.ruleIds = currentGroup.ruleIds.filter((ruleId) => ruleId !== rule.id);
         }
         state.rulesConfig.rules = state.rulesConfig.rules.filter((item) => item.id !== rule.id);
+        clearRuleDraft(rule.id);
         removeEmptyRuleGroups();
         syncRulesArrayFromGroups();
         renderRules();
-        renderOutput();
+        renderStats();
       });
       body.appendChild(row);
     });
@@ -2762,11 +3043,139 @@ function renderRuleList() {
 }
 
 function renderRules() {
-  renderSnifferSummary();
-  renderSnifferEditor();
-  renderProvidersSummary();
-  renderProvidersEditor();
   renderRuleList();
+}
+
+function renderRuleList() {
+  ensureRuleGroupingState();
+  els.rulesEditor.innerHTML = "";
+  buildRuleGroups().forEach((group) => {
+    const card = document.createElement("section");
+    card.className = "rule-group";
+    card.dataset.groupId = group.id;
+    card.classList.toggle("collapsed", group.collapsed !== false);
+
+    const head = document.createElement("div");
+    head.className = "rule-group-head";
+
+    const meta = document.createElement("div");
+    meta.className = "rule-group-meta";
+
+    const groupInput = document.createElement("input");
+    groupInput.className = "rule-group-name";
+    groupInput.value = getRuleGroupDraft(group.id)?.name ?? group.name;
+    groupInput.placeholder = "规则分组名称";
+    groupInput.addEventListener("input", (event) => {
+      setRuleGroupDraft(group.id, { name: event.target.value.trim() });
+    });
+
+    const targetSummary = document.createElement("div");
+    targetSummary.className = "rule-group-targets";
+    targetSummary.textContent = `目标策略: ${group.targets.join(" / ") || "未设置"} | ${group.rules.length} 条`;
+
+    meta.append(groupInput, targetSummary);
+
+    const actions = document.createElement("div");
+    actions.className = "rule-group-actions";
+
+    const topBtn = document.createElement("button");
+    topBtn.type = "button";
+    topBtn.className = "ghost";
+    topBtn.textContent = "置顶";
+    topBtn.disabled = findRuleGroupIndex(group.id) <= 0;
+    topBtn.addEventListener("click", () => moveRuleGroupToIndex(group.id, 0));
+
+    const upBtn = document.createElement("button");
+    upBtn.type = "button";
+    upBtn.className = "ghost";
+    upBtn.textContent = "上移";
+    upBtn.disabled = findRuleGroupIndex(group.id) <= 0;
+    upBtn.addEventListener("click", () => moveRuleGroupToIndex(group.id, findRuleGroupIndex(group.id) - 1));
+
+    const downBtn = document.createElement("button");
+    downBtn.type = "button";
+    downBtn.className = "ghost";
+    downBtn.textContent = "下移";
+    downBtn.disabled = findRuleGroupIndex(group.id) >= state.rulesConfig.ruleGroups.length - 1;
+    downBtn.addEventListener("click", () => moveRuleGroupToIndex(group.id, findRuleGroupIndex(group.id) + 1));
+
+    const toggleBtn = document.createElement("button");
+    toggleBtn.type = "button";
+    toggleBtn.className = "ghost";
+    toggleBtn.textContent = group.collapsed !== false ? "展开" : "折叠";
+    toggleBtn.addEventListener("click", () => {
+      const currentGroup = state.rulesConfig.ruleGroups.find((item) => item.id === group.id);
+      if (!currentGroup) return;
+      currentGroup.collapsed = !(currentGroup.collapsed !== false);
+      renderRules();
+    });
+
+    const addRuleBtn = document.createElement("button");
+    addRuleBtn.type = "button";
+    addRuleBtn.className = "ghost";
+    addRuleBtn.textContent = "新增规则";
+    addRuleBtn.addEventListener("click", () => {
+      const currentGroup = state.rulesConfig.ruleGroups.find((item) => item.id === group.id);
+      if (!currentGroup) return;
+      const rule = ruleWithDefaults({
+        id: uid("rule"),
+        target: group.rules[0]?.target || "节点选择",
+        group: currentGroup.emitComment ? currentGroup.name : (group.rules[0]?.target || "节点选择")
+      });
+      rule.groupId = currentGroup.id;
+      currentGroup.ruleIds.push(rule.id);
+      state.rulesConfig.rules.push(rule);
+      syncRulesArrayFromGroups();
+      renderRules();
+      renderStats();
+    });
+
+    actions.append(topBtn, upBtn, downBtn, toggleBtn, addRuleBtn);
+    head.append(meta, actions);
+
+    const body = document.createElement("div");
+    body.className = "rule-group-body";
+
+    group.rules.forEach((rule) => {
+      const row = els.ruleTemplate.content.firstElementChild.cloneNode(true);
+      const draft = getRuleDraft(rule.id);
+      const typeInput = row.querySelector(".rule-type");
+      const valueInput = row.querySelector(".rule-value");
+      const targetInput = row.querySelector(".rule-target");
+      row.dataset.ruleId = rule.id;
+      typeInput.value = draft?.type ?? rule.type;
+      valueInput.value = draft?.value ?? rule.value;
+      targetInput.value = draft?.target ?? rule.target;
+      typeInput.addEventListener("change", (event) => {
+        setRuleDraft(rule.id, { type: event.target.value });
+      });
+      valueInput.addEventListener("input", (event) => {
+        setRuleDraft(rule.id, { value: event.target.value });
+      });
+      targetInput.addEventListener("input", (event) => {
+        setRuleDraft(rule.id, { target: event.target.value.trim() });
+      });
+      row.querySelector(".rule-delete").addEventListener("click", () => {
+        const currentGroup = state.rulesConfig.ruleGroups.find((item) => item.id === rule.groupId);
+        if (currentGroup) {
+          currentGroup.ruleIds = currentGroup.ruleIds.filter((ruleId) => ruleId !== rule.id);
+          if (!currentGroup.ruleIds.length) {
+            clearRuleGroupDraft(currentGroup.id);
+          }
+        }
+        state.rulesConfig.rules = state.rulesConfig.rules.filter((item) => item.id !== rule.id);
+        clearRuleDraft(rule.id);
+        removeEmptyRuleGroups();
+        syncRulesArrayFromGroups();
+        renderRules();
+        renderStats();
+      });
+      body.appendChild(row);
+    });
+
+    card.append(head, body);
+    els.rulesEditor.appendChild(card);
+  });
 }
 
 function appendFormattedRules(lines) {
@@ -2781,6 +3190,40 @@ function appendFormattedRules(lines) {
       lines.push(`  - ${formatRuleLine(rule)}`);
     });
   });
+}
+
+async function confirmAndSaveWorkspace() {
+  commitRuleEditorDrafts();
+  render();
+  clearTimeout(persistTimer);
+
+  if (!window.desktopAPI?.saveSession) return;
+
+  const button = els.saveWorkspaceBtn;
+  const originalLabel = button?.dataset.defaultLabel || button?.textContent || "确认并保存";
+
+  if (button) {
+    button.dataset.defaultLabel = originalLabel;
+    button.classList.add("is-saving");
+    button.textContent = "保存中...";
+  }
+
+  try {
+    await window.desktopAPI.saveSession(snapshotState());
+    if (button) {
+      button.textContent = "已保存";
+    }
+  } catch {
+    if (button) {
+      button.textContent = "保存失败";
+    }
+  } finally {
+    setTimeout(() => {
+      if (!button) return;
+      button.classList.remove("is-saving");
+      button.textContent = originalLabel;
+    }, 1200);
+  }
 }
 
 async function boot() {
@@ -2801,6 +3244,15 @@ async function boot() {
     els.addRuleGroupBtn = addRuleGroupBtn;
     els.addRuleGroupBtn.addEventListener("click", () => {
       createRuleGroupAtTop({ name: createRuleGroupName(), emitComment: true, target: "节点选择" });
+    });
+  }
+
+  if (els.saveWorkspaceBtn) {
+    const saveWorkspaceBtn = els.saveWorkspaceBtn.cloneNode(true);
+    els.saveWorkspaceBtn.replaceWith(saveWorkspaceBtn);
+    els.saveWorkspaceBtn = saveWorkspaceBtn;
+    els.saveWorkspaceBtn.addEventListener("click", () => {
+      confirmAndSaveWorkspace().catch(() => {});
     });
   }
 
